@@ -539,7 +539,28 @@ struct InterfaceDetails
     bool haveMask = false;
     uint16_t mask = 0; // PID_DEVICE_DESCRIPTOR = KNX mask version
     bool haveFirmware = false;
-    uint16_t firmware = 0; // PID_FIRMWARE_REVISION
+    uint16_t firmware = 0; // PID_FIRMWARE_REVISION, the revision at full precision
+    bool haveVersion = false;
+    uint16_t version = 0;  // PID_VERSION, DPT_Version: 5 bit revision | 5 bit major | 6 bit minor
+
+    // descriptive device information (03_05_01 4.2.2 / 4.2.19 / 4.3.6; ISO 8859-1 text, one octet per element)
+    bool haveDeviceName = false;
+    char deviceName[81] = {0}; // PID_OBJECT_NAME
+    bool haveHardwareId = false;
+    char hardwareId[33] = {0}; // PID_MANUFACTURER_DATA
+    bool haveFirmwareName = false;
+    char firmwareName[49] = {0}; // manufacturer specific PID 203
+    bool haveMfrDeviceName = false;
+    char mfrDeviceName[81] = {0}; // manufacturer specific PID 204: the name PID 2 may have been overwritten
+    uint32_t buildTimestamp = 0; // manufacturer specific PID 205, seconds since the epoch, 0 = not set
+    bool haveFwBuild = false;
+    char firmwareBuild[17] = {0};                     // manufacturer specific PID 206, short git hash
+    bool haveProductId = false;
+    uint8_t productId[10] = {0}; // PID_PRODUCT_ID
+    bool havePeiType = false;
+    uint8_t peiType = 0; // PID_PEI_TYPE
+    bool haveMaxRetry = false;
+    uint8_t maxRetry = 0; // PID_MAX_RETRY_COUNT
 
     // max interface APDU (cEMI Server IOT 8 PID 68/69, else Device IOT 0 PID 56)
     bool haveApdu = false;
@@ -573,6 +594,27 @@ namespace detail
 inline uint16_t be16(const uint8_t* b) { return (uint16_t)((b[0] << 8) | b[1]); }
 inline uint32_t be32(const uint8_t* b) { return (uint32_t)((b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]); }
 } // namespace detail
+
+/**
+ * @brief Render ISO 8859-1 device text as UTF-8 for the terminal.
+ * @details The KNX text Properties carry one octet per character (03_05_01 4.2.2), so a byte >= 0x80 is a
+ *          Latin-1 code point and needs two UTF-8 octets here.
+ */
+inline std::string latin1ToUtf8(const char* text)
+{
+    std::string out;
+    for (const unsigned char* p = (const unsigned char*)text; *p; ++p)
+    {
+        if (*p < 0x80)
+            out += (char)*p;
+        else
+        {
+            out += (char)(0xC0 | (*p >> 6));
+            out += (char)(0x80 | (*p & 0x3F));
+        }
+    }
+    return out;
+}
 
 /**
  * @brief Read a whole property ARRAY into `out` (bytes). Returns the total byte count.
@@ -682,6 +724,59 @@ inline bool queryInterfaceDetails(const std::string& ip, uint16_t port, Interfac
     {
         out.firmware = L >= 2 ? detail::be16(d) : d[0];
         out.haveFirmware = true;
+    }
+    if (s.read(IOT_DEVICE, 1, 25, 1, d, sizeof(d), L) && L >= 2)
+    {
+        out.version = detail::be16(d);
+        out.haveVersion = true;
+    }
+    if (s.read(IOT_DEVICE, 1, 16, 1, d, sizeof(d), L) && L >= 1)
+    {
+        out.peiType = d[0];
+        out.havePeiType = true;
+    }
+    if (s.read(IOT_DEVICE, 1, 52, 1, d, sizeof(d), L) && L >= 1)
+    {
+        out.maxRetry = d[0];
+        out.haveMaxRetry = true;
+    }
+    if (s.read(IOT_DEVICE, 1, 55, 1, d, sizeof(d), L) && L >= sizeof(out.productId))
+    {
+        std::memcpy(out.productId, d, sizeof(out.productId));
+        out.haveProductId = true;
+    }
+
+    if (out.manufacturer == 0x00FA && s.read(IOT_DEVICE, 1, 205, 1, d, sizeof(d), L) >= 1 && L >= 4)
+        out.buildTimestamp = ((uint32_t)d[0] << 24) | ((uint32_t)d[1] << 16) | ((uint32_t)d[2] << 8) | d[3];
+
+    // The text Properties are arrays of 1-octet characters, so their length comes from index 0.
+    struct
+    {
+        uint8_t pid;
+        char* dst;
+        size_t cap;
+        bool* have;
+    } texts[] = {
+        {2, out.deviceName, sizeof(out.deviceName), &out.haveDeviceName},
+        {19, out.hardwareId, sizeof(out.hardwareId), &out.haveHardwareId},
+        {203, out.firmwareName, sizeof(out.firmwareName), &out.haveFirmwareName},
+        {204, out.mfrDeviceName, sizeof(out.mfrDeviceName), &out.haveMfrDeviceName},
+        {206, out.firmwareBuild, sizeof(out.firmwareBuild), &out.haveFwBuild},
+    };
+    for (auto& t : texts)
+    {
+        // PIDs above 201 are manufacturer specific (03_05_01 4.3.1): every manufacturer uses them for
+        // its own purposes. Measured on two Siemens devices, both answer 203 and 204 with unrelated
+        // data - reading them as OpenKNX text would print that as a device name.
+        if (t.pid > 201 && out.manufacturer != 0x00FA) continue;
+
+        uint8_t raw[128];
+        const size_t n = readPropArray(s, IOT_DEVICE, 1, t.pid, 1, raw, sizeof(raw), (uint16_t)(t.cap - 1));
+        size_t j = 0;
+        for (size_t i = 0; i < n && j < t.cap - 1; ++i)
+            if (raw[i] >= 0x20) t.dst[j++] = (char)raw[i]; // keep ISO 8859-1 high range, drop control codes
+        t.dst[j] = 0;
+        *t.have = j > 0;
     }
 
     // --- max interface APDU: cEMI Server (IOT 8) PID 68/69, else Device (IOT 0) PID 56 ---
