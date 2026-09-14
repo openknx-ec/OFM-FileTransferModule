@@ -86,6 +86,7 @@ typedef int sock_t;
 #include "core/GaImport.h"
 #include "core/GaTable.h"
 #include "core/DeviceMgmt.h"
+#include "core/DeviceText.h"
 #include "core/Discovery.h"
 #include "core/Gzip.h"
 #include "core/GaOps.h"
@@ -99,6 +100,41 @@ typedef int sock_t;
 #include "serve/LeaseClient.h"
 #include "serve/Worker.h"
 #include "core/SelfInstall.h"
+
+/**
+ * @brief "1.3.0+b90b324" - version from PID_VERSION, revision from PID_FIRMWARE_REVISION, hash from PID 206.
+ * @details Nothing is read twice for this: the numbers already sit in the standard Properties, only the
+ *          build hash is manufacturer specific.
+ */
+static std::string fwVersionText(bool haveVer, uint16_t version, bool haveRev, uint16_t revision, const char* build)
+{
+    if (!haveVer) return build && build[0] ? std::string("+") + build : std::string();
+    const unsigned maj = (version >> 6) & 0x1F;
+    const unsigned min = version & 0x3F;
+    const unsigned rev = haveRev ? (unsigned)revision : (unsigned)((version >> 11) & 0x1F);
+    char b[48];
+    std::snprintf(b, sizeof(b), "%u.%u.%u", maj, min, rev);
+    std::string t(b);
+    if (build && build[0]) t += std::string("+") + build;
+    return t;
+}
+
+/** @brief A build timestamp as local time; empty when the device did not report one. */
+static std::string buildTimeText(uint32_t ts)
+{
+    if (ts == 0) return std::string();
+    const std::time_t t = (std::time_t)ts;
+    std::tm tmv{};
+#ifdef _WIN32
+    localtime_s(&tmv, &t);
+#else
+    localtime_r(&t, &tmv);
+#endif
+    char b[32];
+    std::strftime(b, sizeof(b), "%Y-%m-%d %H:%M:%S", &tmv);
+    return std::string(b);
+}
+
 static ftc::Term g_term;
 static ftc::I18n g_i18n;
 static ftc::Theme g_theme(g_term);
@@ -3508,6 +3544,29 @@ static int renderInterfaceInfo(const std::string& ip, uint16_t port, bool quiet)
         }
         if (det.haveOrder)
             p.kv(L.tr("Order info", "Bestellnr."), c.txt(det.order));
+        if (det.haveDeviceName)
+            p.kv(L.tr("Device name", "Geraetename"), c.txt(ftc::latin1ToUtf8(det.deviceName)));
+        if (det.haveHardwareId)
+            p.kv(L.tr("Hardware ID", "Hardware-Kennung"), c.txt(ftc::latin1ToUtf8(det.hardwareId)));
+        if (det.haveMfrDeviceName && std::strcmp(det.mfrDeviceName, det.deviceName) != 0)
+            p.kv(L.tr("Device name (factory)", "Geraetename (ab Werk)"), c.txt(ftc::latin1ToUtf8(det.mfrDeviceName)));
+        if (det.haveFirmwareName)
+            p.kv(L.tr("Firmware name", "Firmware-Name"), c.txt(ftc::latin1ToUtf8(det.firmwareName)));
+        {
+            const std::string fv = fwVersionText(det.haveVersion, det.version, det.haveFirmware, det.firmware, det.firmwareBuild);
+            if (!fv.empty()) p.kv(L.tr("Firmware build", "Firmware-Stand"), c.txt(fv));
+            const std::string bt = buildTimeText(det.buildTimestamp);
+            if (!bt.empty()) p.kv(L.tr("Built", "Gebaut"), c.txt(bt));
+        }
+        if (det.haveProductId)
+        {
+            char pidbuf[64];
+            std::snprintf(pidbuf, sizeof(pidbuf), "%02X%02X  %02X %02X %02X %02X %02X%02X %02X %02X",
+                          det.productId[0], det.productId[1], det.productId[2], det.productId[3],
+                          det.productId[4], det.productId[5], det.productId[6], det.productId[7],
+                          det.productId[8], det.productId[9]);
+            p.kv(L.tr("Product ID", "Produkt-ID"), c.txt(pidbuf));
+        }
         if (det.haveHardware)
         {
             std::string h;
@@ -3522,6 +3581,16 @@ static int renderInterfaceInfo(const std::string& ip, uint16_t port, bool quiet)
         }
         if (det.haveFirmware)
             p.kv(L.tr("Firmware rev.", "Firmware-Rev."), c.txt(std::to_string((unsigned)det.firmware)));
+        if (det.havePeiType)
+            p.kv(L.tr("PEI type", "PEI-Typ"), c.txt(std::to_string((unsigned)det.peiType)));
+        if (det.haveMaxRetry)
+        {
+            char rbuf[48];
+            std::snprintf(rbuf, sizeof(rbuf), "0x%02X", det.maxRetry);
+            p.kv(L.tr("Max retry count", "Wiederholungen"),
+                 c.txt(rbuf) + c.dim(L.tr("  · busy ", "  · Busy ") + std::to_string((det.maxRetry >> 4) & 7) +
+                                     L.tr(" / nak ", " / Nak ") + std::to_string(det.maxRetry & 7)));
+        }
         if (det.haveMask)
         {
             const char* mn = ftc::knxMaskName(det.mask);
@@ -3773,6 +3842,7 @@ static std::string paToStr(uint16_t pa)
 }
 
 /** @brief "a.l.d" -> the 16-bit address; 0 when it is not one (0.0.0 is not a device address). */
+
 static uint16_t paFromText(const std::string& t)
 {
     unsigned a = 0, l = 0, d = 0;
@@ -4949,6 +5019,18 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
                 feat = "(none)";
             char vbuf[16];
             std::snprintf(vbuf, sizeof(vbuf), "%u.%u.%u", maj, min, rev);
+
+            // The descriptive Properties are not part of the FTC steckbrief; read them straight over the
+            // tunnel so the device firmware carries no extra state for them. A device without them stays silent.
+            ftc::AccessDeps dtDeps;
+            dtDeps.pump = []() {
+                g_knxTunnel.pump();
+                openknxFileTransferClient.loop(true);
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            };
+            dtDeps.nowMs = []() { return nowMs(); };
+            dtDeps.aborted = []() { return g_abort != 0; };
+            const ftc::BusDeviceText dt = ftc::readBusDeviceText(g_knxTunnel, paFromText(target), dtDeps);
             if (quiet)
             {
                 std::printf("pa\t%s\n", target.c_str());
@@ -4960,6 +5042,18 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
                     std::printf("serial\t%02X%02X%02X%02X%02X%02X\n", d.serial[0], d.serial[1], d.serial[2], d.serial[3], d.serial[4], d.serial[5]);
                 }
                 if (d.haveOrder) std::printf("order\t%s\n", d.order);
+                if (dt.name[0]) std::printf("device_name\t%s\n", ftc::latin1ToUtf8(dt.name).c_str());
+                if (dt.hardwareId[0]) std::printf("hardware_id\t%s\n", ftc::latin1ToUtf8(dt.hardwareId).c_str());
+                if (dt.firmwareName[0]) std::printf("firmware_name\t%s\n", ftc::latin1ToUtf8(dt.firmwareName).c_str());
+                if (dt.mfrDeviceName[0]) std::printf("device_name_factory\t%s\n", ftc::latin1ToUtf8(dt.mfrDeviceName).c_str());
+                {
+                    const std::string fv = fwVersionText(d.haveVersion, d.version, false, 0, dt.firmwareBuild);
+                    if (!fv.empty()) std::printf("firmware_build\t%s\n", fv.c_str());
+                    if (dt.buildTimestamp) std::printf("build_timestamp\t%u\n", dt.buildTimestamp);
+                }
+                if (dt.haveProductId) std::printf("product_id\t%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X\n", dt.productId[0], dt.productId[1], dt.productId[2], dt.productId[3], dt.productId[4], dt.productId[5], dt.productId[6], dt.productId[7], dt.productId[8], dt.productId[9]);
+                if (dt.havePeiType) std::printf("pei_type\t%u\n", (unsigned)dt.peiType);
+                if (dt.haveMaxRetry) std::printf("max_retry\t0x%02X\n", dt.maxRetry);
                 if (d.haveHw) std::printf("hardware\t%02X%02X%02X%02X%02X%02X\n", d.hardware[0], d.hardware[1], d.hardware[2], d.hardware[3], d.hardware[4], d.hardware[5]);
                 if (d.haveVersion) std::printf("version\t[%u] %u.%u\n", (d.version >> 11) & 0x1F, (d.version >> 6) & 0x1F, d.version & 0x3F);
                 if (d.ftmVersion) std::printf("ftm_version\t%s\n", vbuf);
@@ -4990,8 +5084,57 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
             }
             if (!d.valid)
             {
-                t.status(ftc::Tpl::Stat::Err, target + " " + L.tr("no device info", "keine Geräte-Info"),
-                         {L.tr("not a KnxFileTransfer / no answer", "kein KnxFileTransfer / keine Antwort")});
+                // No KnxFileTransfer server does not mean no Device Object - the Property services are
+                // part of every KNX device. Fall back to reading them straight over the tunnel.
+                if (!dt.any())
+                {
+                    t.status(ftc::Tpl::Stat::Err, target + " " + L.tr("no device info", "keine Geräte-Info"),
+                             {L.tr("not a KnxFileTransfer / no answer", "kein KnxFileTransfer / keine Antwort")});
+                    break;
+                }
+                ftc::Panel fp(t, L.tr("Device (Properties only)", "Gerät (nur Properties)"), target);
+                char fb[64];
+                if (dt.haveMask)
+                {
+                    std::snprintf(fb, sizeof(fb), "0x%04X", dt.mask);
+                    const char* mn = ftc::knxMaskName(dt.mask);
+                    fp.kv(L.tr("Mask / class", "Maske / Klasse"), c.txt(fb) + (mn[0] ? c.dim(std::string("  · ") + mn) : std::string()));
+                }
+                if (dt.haveManufacturer)
+                {
+                    std::snprintf(fb, sizeof(fb), "0x%04X (%u)", dt.manufacturer, dt.manufacturer);
+                    fp.kv(L.tr("Manufacturer", "Hersteller"), c.txt(fb));
+                }
+                if (dt.haveOrderInfo)
+                {
+                    std::string oi;
+                    for (size_t k = 0; k < sizeof(dt.orderInfo); ++k)
+                    {
+                        std::snprintf(fb, sizeof(fb), "%02X ", dt.orderInfo[k]);
+                        oi += fb;
+                    }
+                    if (!oi.empty() && oi.back() == ' ') oi.pop_back();
+                    fp.kv(L.tr("Order info", "Bestellnr."), c.txt(oi));
+                }
+                if (dt.name[0]) fp.kv(L.tr("Device name", "Geraetename"), c.txt(ftc::latin1ToUtf8(dt.name)));
+                if (dt.hardwareId[0]) fp.kv(L.tr("Hardware ID", "Hardware-Kennung"), c.txt(ftc::latin1ToUtf8(dt.hardwareId)));
+                if (dt.mfrDeviceName[0]) fp.kv(L.tr("Device name (factory)", "Geraetename (ab Werk)"), c.txt(ftc::latin1ToUtf8(dt.mfrDeviceName)));
+                if (dt.firmwareName[0]) fp.kv(L.tr("Firmware name", "Firmware-Name"), c.txt(ftc::latin1ToUtf8(dt.firmwareName)));
+                if (dt.haveProductId)
+                {
+                    std::snprintf(fb, sizeof(fb), "%02X%02X  %02X %02X %02X %02X %02X%02X %02X %02X",
+                                  dt.productId[0], dt.productId[1], dt.productId[2], dt.productId[3], dt.productId[4],
+                                  dt.productId[5], dt.productId[6], dt.productId[7], dt.productId[8], dt.productId[9]);
+                    fp.kv(L.tr("Product ID", "Produkt-ID"), c.txt(fb));
+                }
+                if (dt.havePeiType) fp.kv(L.tr("PEI type", "PEI-Typ"), c.txt(std::to_string((unsigned)dt.peiType)));
+                if (dt.haveMaxRetry)
+                {
+                    std::snprintf(fb, sizeof(fb), "0x%02X", dt.maxRetry);
+                    fp.kv(L.tr("Max retry count", "Wiederholungen"), c.txt(fb));
+                }
+                fp.render();
+                rc = 0;
                 break;
             }
             char mbuf[16];
@@ -5007,10 +5150,38 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
                 p.kv(L.tr("Serial", "Seriennr."), c.txt(ib));
             }
             if (d.haveOrder) p.kv(L.tr("Order number", "Bestellnr."), c.txt(d.order));
+            if (dt.name[0]) p.kv(L.tr("Device name", "Geraetename"), c.txt(ftc::latin1ToUtf8(dt.name)));
+            if (dt.hardwareId[0]) p.kv(L.tr("Hardware ID", "Hardware-Kennung"), c.txt(ftc::latin1ToUtf8(dt.hardwareId)));
+            if (dt.mfrDeviceName[0] && std::strcmp(dt.mfrDeviceName, dt.name) != 0)
+                p.kv(L.tr("Device name (factory)", "Geraetename (ab Werk)"), c.txt(ftc::latin1ToUtf8(dt.mfrDeviceName)));
+            if (dt.firmwareName[0]) p.kv(L.tr("Firmware name", "Firmware-Name"), c.txt(ftc::latin1ToUtf8(dt.firmwareName)));
+            {
+                const std::string fv = fwVersionText(d.haveVersion, d.version, false, 0, dt.firmwareBuild);
+                if (!fv.empty()) p.kv(L.tr("Firmware build", "Firmware-Stand"), c.txt(fv));
+                const std::string bt = buildTimeText(dt.buildTimestamp);
+                if (!bt.empty()) p.kv(L.tr("Built", "Gebaut"), c.txt(bt));
+            }
+            if (dt.haveProductId)
+            {
+                char pb[64];
+                std::snprintf(pb, sizeof(pb), "%02X%02X  %02X %02X %02X %02X %02X%02X %02X %02X",
+                              dt.productId[0], dt.productId[1], dt.productId[2], dt.productId[3], dt.productId[4],
+                              dt.productId[5], dt.productId[6], dt.productId[7], dt.productId[8], dt.productId[9]);
+                p.kv(L.tr("Product ID", "Produkt-ID"), c.txt(pb));
+            }
             if (d.haveHw)
             {
                 std::snprintf(ib, sizeof(ib), "%02X %02X %02X %02X %02X %02X", d.hardware[0], d.hardware[1], d.hardware[2], d.hardware[3], d.hardware[4], d.hardware[5]);
                 p.kv(L.tr("Hardware type", "Hardware-Typ"), c.txt(ib) + c.dim(std::string("  · app 0x") + [&] { char a[8]; std::snprintf(a, sizeof(a), "%04X", (d.hardware[2] << 8) | d.hardware[3]); return std::string(a); }()));
+            }
+            if (dt.havePeiType) p.kv(L.tr("PEI type", "PEI-Typ"), c.txt(std::to_string((unsigned)dt.peiType)));
+            if (dt.haveMaxRetry)
+            {
+                char rb[48];
+                std::snprintf(rb, sizeof(rb), "0x%02X", dt.maxRetry);
+                p.kv(L.tr("Max retry count", "Wiederholungen"),
+                     c.txt(rb) + c.dim(L.tr("  · busy ", "  · Busy ") + std::to_string((dt.maxRetry >> 4) & 7) +
+                                       L.tr(" / nak ", " / Nak ") + std::to_string(dt.maxRetry & 7)));
             }
             if (d.haveVersion)
             {
