@@ -60,6 +60,9 @@ inline const char* espChipName(uint16_t chipId)
         case 0x000C: return "ESP32-C2";
         case 0x000D: return "ESP32-C6";
         case 0x0010: return "ESP32-H2";
+        case 0x0012: return "ESP32-P4";
+        case 0x0014: return "ESP32-C61";
+        case 0x0017: return "ESP32-C5";
         default: return "unknown ESP chip";
     }
 }

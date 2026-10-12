@@ -134,6 +134,7 @@ struct BusDeviceText
     char firmwareName[49] = {0}; ///< manufacturer specific PID 203
     char mfrDeviceName[81] = {0}; ///< manufacturer specific PID 204
     char firmwareBuild[17] = {0}; ///< manufacturer specific PID 206, short git hash
+    char mcu[17] = {0};           ///< manufacturer specific PID 207, chip the firmware is built for
     uint32_t buildTimestamp = 0;  ///< PID 205, seconds since the epoch
     uint8_t productId[10] = {0}; bool haveProductId = false; ///< PID_PRODUCT_ID (55)
     uint16_t manufacturer = 0; bool haveManufacturer = false; ///< PID_MANUFACTURER_ID (12)
@@ -145,7 +146,7 @@ struct BusDeviceText
     bool any() const
     {
         return name[0] || hardwareId[0] || firmwareName[0] || mfrDeviceName[0] || firmwareBuild[0] ||
-               buildTimestamp || haveProductId || havePeiType || haveMaxRetry || haveManufacturer ||
+               mcu[0] || buildTimestamp || haveProductId || havePeiType || haveMaxRetry || haveManufacturer ||
                haveMask || haveOrderInfo;
     }
 };
@@ -186,6 +187,7 @@ inline BusDeviceText readBusDeviceText(KnxIpTunnel& tunnel, uint16_t pa, const A
         readBusText(tunnel, pa, 203, t.firmwareName, sizeof(t.firmwareName), d, timeoutMs);
         readBusText(tunnel, pa, 204, t.mfrDeviceName, sizeof(t.mfrDeviceName), d, timeoutMs);
         readBusText(tunnel, pa, 206, t.firmwareBuild, sizeof(t.firmwareBuild), d, timeoutMs);
+        readBusText(tunnel, pa, 207, t.mcu, sizeof(t.mcu), d, timeoutMs);
         if (readBusProperty(tunnel, pa, 205, buf, sizeof(buf), d, timeoutMs) >= 4)
             t.buildTimestamp = ((uint32_t)buf[0] << 24) | ((uint32_t)buf[1] << 16) | ((uint32_t)buf[2] << 8) | buf[3];
     }

@@ -3552,6 +3552,7 @@ static int renderInterfaceInfo(const std::string& ip, uint16_t port, bool quiet)
             p.kv(L.tr("Device name (factory)", "Geraetename (ab Werk)"), c.txt(ftc::latin1ToUtf8(det.mfrDeviceName)));
         if (det.haveFirmwareName)
             p.kv(L.tr("Firmware name", "Firmware-Name"), c.txt(ftc::latin1ToUtf8(det.firmwareName)));
+        if (det.haveMcu) p.kv("Chip", c.txt(ftc::latin1ToUtf8(det.mcu)));
         {
             const std::string fv = fwVersionText(det.haveVersion, det.version, det.haveFirmware, det.firmware, det.firmwareBuild);
             if (!fv.empty()) p.kv(L.tr("Firmware build", "Firmware-Stand"), c.txt(fv));
@@ -5046,6 +5047,7 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
                 if (dt.hardwareId[0]) std::printf("hardware_id\t%s\n", ftc::latin1ToUtf8(dt.hardwareId).c_str());
                 if (dt.firmwareName[0]) std::printf("firmware_name\t%s\n", ftc::latin1ToUtf8(dt.firmwareName).c_str());
                 if (dt.mfrDeviceName[0]) std::printf("device_name_factory\t%s\n", ftc::latin1ToUtf8(dt.mfrDeviceName).c_str());
+                if (dt.mcu[0]) std::printf("mcu\t%s\n", ftc::latin1ToUtf8(dt.mcu).c_str());
                 {
                     const std::string fv = fwVersionText(d.haveVersion, d.version, false, 0, dt.firmwareBuild);
                     if (!fv.empty()) std::printf("firmware_build\t%s\n", fv.c_str());
@@ -5120,6 +5122,7 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
                 if (dt.hardwareId[0]) fp.kv(L.tr("Hardware ID", "Hardware-Kennung"), c.txt(ftc::latin1ToUtf8(dt.hardwareId)));
                 if (dt.mfrDeviceName[0]) fp.kv(L.tr("Device name (factory)", "Geraetename (ab Werk)"), c.txt(ftc::latin1ToUtf8(dt.mfrDeviceName)));
                 if (dt.firmwareName[0]) fp.kv(L.tr("Firmware name", "Firmware-Name"), c.txt(ftc::latin1ToUtf8(dt.firmwareName)));
+                if (dt.mcu[0]) fp.kv("Chip", c.txt(ftc::latin1ToUtf8(dt.mcu)));
                 if (dt.haveProductId)
                 {
                     std::snprintf(fb, sizeof(fb), "%02X%02X  %02X %02X %02X %02X %02X%02X %02X %02X",
@@ -5155,6 +5158,7 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
             if (dt.mfrDeviceName[0] && std::strcmp(dt.mfrDeviceName, dt.name) != 0)
                 p.kv(L.tr("Device name (factory)", "Geraetename (ab Werk)"), c.txt(ftc::latin1ToUtf8(dt.mfrDeviceName)));
             if (dt.firmwareName[0]) p.kv(L.tr("Firmware name", "Firmware-Name"), c.txt(ftc::latin1ToUtf8(dt.firmwareName)));
+            if (dt.mcu[0]) p.kv("Chip", c.txt(ftc::latin1ToUtf8(dt.mcu)));
             {
                 const std::string fv = fwVersionText(d.haveVersion, d.version, false, 0, dt.firmwareBuild);
                 if (!fv.empty()) p.kv(L.tr("Firmware build", "Firmware-Stand"), c.txt(fv));
