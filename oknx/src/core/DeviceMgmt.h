@@ -555,6 +555,8 @@ struct InterfaceDetails
     uint32_t buildTimestamp = 0; // manufacturer specific PID 205, seconds since the epoch, 0 = not set
     bool haveFwBuild = false;
     char firmwareBuild[17] = {0};                     // manufacturer specific PID 206, short git hash
+    bool haveMcu = false;
+    char mcu[17] = {0}; // manufacturer specific PID 207, chip the firmware is built for
     bool haveProductId = false;
     uint8_t productId[10] = {0}; // PID_PRODUCT_ID
     bool havePeiType = false;
@@ -762,6 +764,7 @@ inline bool queryInterfaceDetails(const std::string& ip, uint16_t port, Interfac
         {203, out.firmwareName, sizeof(out.firmwareName), &out.haveFirmwareName},
         {204, out.mfrDeviceName, sizeof(out.mfrDeviceName), &out.haveMfrDeviceName},
         {206, out.firmwareBuild, sizeof(out.firmwareBuild), &out.haveFwBuild},
+        {207, out.mcu, sizeof(out.mcu), &out.haveMcu},
     };
     for (auto& t : texts)
     {
