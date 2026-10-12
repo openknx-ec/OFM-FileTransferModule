@@ -11,6 +11,7 @@
  **/
 #pragma once
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <iterator>
 #include <string>
@@ -51,6 +52,43 @@ inline bool gzipBuffer(const uint8_t* src, size_t n, std::vector<uint8_t>& out)
 /**
  * @brief Gzip a file on disk. Returns false on any I/O or compression failure.
  */
+/**
+ * @brief Unpack the first bytes of a gzip stream.
+ * @details Only as much as @p cap holds: enough to see what kind of image the file carries.
+ * @return number of bytes written to @p out, 0 if the data is not a readable gzip stream
+ */
+inline size_t gunzipHead(const uint8_t* gz, size_t n, uint8_t* out, size_t cap)
+{
+    if (n < 18 || gz[0] != 0x1F || gz[1] != 0x8B || gz[2] != 8) return 0;
+    const uint8_t flags = gz[3];
+    size_t pos = 10;
+    if (flags & 0x04) // FEXTRA
+    {
+        if (pos + 2 > n) return 0;
+        pos += 2 + ((size_t)gz[pos] | ((size_t)gz[pos + 1] << 8));
+    }
+    for (uint8_t bit : {(uint8_t)0x08, (uint8_t)0x10}) // FNAME, FCOMMENT: zero terminated
+        if (flags & bit)
+        {
+            while (pos < n && gz[pos] != 0) ++pos;
+            ++pos;
+        }
+    if (flags & 0x02) pos += 2; // FHCRC
+    if (pos >= n) return 0;
+
+    mz_stream s;
+    std::memset(&s, 0, sizeof(s));
+    if (mz_inflateInit2(&s, -MZ_DEFAULT_WINDOW_BITS) != MZ_OK) return 0;
+    s.next_in = gz + pos;
+    s.avail_in = (unsigned int)(n - pos);
+    s.next_out = out;
+    s.avail_out = (unsigned int)cap;
+    const int rc = mz_inflate(&s, MZ_SYNC_FLUSH);
+    const size_t got = cap - s.avail_out;
+    mz_inflateEnd(&s);
+    return (rc == MZ_OK || rc == MZ_STREAM_END || rc == MZ_BUF_ERROR) ? got : 0;
+}
+
 inline bool gzipFile(const std::string& in, const std::string& out)
 {
     std::ifstream f(in, std::ios::binary);

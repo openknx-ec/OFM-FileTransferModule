@@ -8413,6 +8413,24 @@ int main(int argc, char** argv)
         const ftc::DevVersion dv = ftc::devVersionFrom(di.hardware, di.haveHw, di.version, di.haveVersion);
         const ftc::Verdict verdict = ftc::compareVersions(knxotaFw.id, dv);
 
+        // The chip the device runs on (PID 207), to hold against the chip the file is built for. Only an
+        // OpenKNX device is asked: the PID is manufacturer specific. An older firmware answers nothing.
+        char devChip[17] = {0};
+        if (di.valid && dv.valid)
+        {
+            ftc::AccessDeps chipDeps;
+            chipDeps.pump = []() {
+                g_knxTunnel.pump();
+                openknxFileTransferClient.loop(true);
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            };
+            chipDeps.nowMs = []() { return nowMs(); };
+            chipDeps.aborted = []() { return g_abort != 0; };
+            ftc::readBusText(g_knxTunnel, paFromText(paText), 207, devChip, sizeof(devChip), chipDeps, 1500);
+        }
+        const std::string devFamily = ftc::chipFamily(devChip), fileFamily = ftc::chipFamily(knxotaFw.hardware);
+        const bool chipMismatch = !devFamily.empty() && !fileFamily.empty() && devFamily != fileFamily;
+
         g_tpl.section(L.tr("OpenKNX device", "OpenKNX Gerät") + std::string(" · ") + paText);
         if (!di.valid)
         {
@@ -8436,12 +8454,35 @@ int main(int argc, char** argv)
                  (knxotaFw.id.valid ? c.dim(std::string("   ") + L.tr("application ", "Anwendung ") +
                                             ftc::appIdText(knxotaFw.id.openKnxId, knxotaFw.id.appNumber))
                                     : std::string()));
+        g_tpl.kv("Chip", devFamily.empty()
+                             ? c.dim(L.tr("the device does not report its chip - not compared",
+                                          "das Gerät meldet seinen Chip nicht - nicht verglichen"))
+                             : fileFamily.empty()
+                                   ? c.txt(devChip) + c.dim(L.tr("   the file does not state its chip - not compared",
+                                                                  "   die Datei nennt ihren Chip nicht - nicht verglichen"))
+                                   : c.txt(devChip) + c.dim(L.tr("   file: ", "   Datei: ")) + c.txt(knxotaFw.hardware));
         g_tpl.kv(L.tr("Result", "Ergebnis"), ftc::verdictChip(g_tpl, L, verdict));
         // The chip names the outcome; these lines say what it costs. Without them "NEW APPLICATION" is a
         // label the reader has no way to weigh, and weighing it is exactly what they are here to do.
         for (const auto& e : ftc::verdictExplain(L, verdict))
             g_tpl.kv("", c.dim(e));
         g_tpl.panelEnd();
+
+        // A file for another chip is refused before anything is sent, with or without --force: an ESP
+        // device would reject it only after the whole transfer, and an RP device hands a packed file to
+        // its boot loader unchecked.
+        if (chipMismatch)
+        {
+            g_ui.errorBlock(false, L.tr("this firmware is built for a different chip",
+                                        "diese Firmware ist für einen anderen Chip gebaut"),
+                            {std::string(devChip) + L.tr(" on the device", " auf dem Gerät") + "  ->  " +
+                                 knxotaFw.hardware + L.tr(" in the file", " in der Datei"),
+                             L.tr("nothing was transferred", "es wurde nichts übertragen")},
+                            L.tr("use the firmware file built for this device's chip",
+                                 "die Firmware-Datei nehmen, die für den Chip dieses Geräts gebaut ist"));
+            socketCleanup();
+            return 1;
+        }
 
         // The Update bit is the device's own statement that it can install a firmware. Absent, we do not
         // guess why: a silent file-transfer server and an old one look identical from here, and saying

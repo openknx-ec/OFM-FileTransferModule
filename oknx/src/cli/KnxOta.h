@@ -46,6 +46,39 @@ enum class FwKind
     Gz,      ///< already compressed; passed through untouched
 };
 
+/**
+ * @brief Name the chip an application image is built for, from its first bytes.
+ * @details An ESP image states its chip in the header. An RP2350 image carries the IMAGE_DEF block
+ *          marker in its first 4 KiB; an RP2040 image has the second stage boot loader in front and
+ *          its vector table at 0x100. A packed file gets its name this way: nothing outside says it.
+ * @return the chip name, or nullptr if the bytes fit none of the three
+ */
+inline const char* chipOfImage(const uint8_t* p, size_t n)
+{
+    auto le32 = [p](size_t o) { return (uint32_t)p[o] | ((uint32_t)p[o + 1] << 8) | ((uint32_t)p[o + 2] << 16) | ((uint32_t)p[o + 3] << 24); };
+    if (n >= 16 && p[0] == 0xE9) return espChipName((uint16_t)(p[12] | (p[13] << 8)));
+    for (size_t o = 0; o + 4 <= n && o < 4096; o += 4)
+        if (le32(o) == 0xFFFFDED3u) return "RP2350";
+    if (n >= 0x108)
+    {
+        const uint32_t sp = le32(0x100), reset = le32(0x104);
+        if (sp > 0x20000000u && sp <= 0x20042000u && (reset & 1u) && reset >= 0x10000000u && reset < 0x11000000u)
+            return "RP2040";
+    }
+    return nullptr;
+}
+
+/**
+ * @brief The chip family two names are compared on; empty if the name states none.
+ * @details ARM, RISC-V and non-secure images of an RP2350 run on the same chip.
+ */
+inline std::string chipFamily(const std::string& name)
+{
+    if (name.rfind("RP2350", 0) == 0) return "RP2350";
+    if (name == "RP2040" || name.rfind("ESP32", 0) == 0) return name;
+    return std::string();
+}
+
 /** @brief The firmware file, as far as it describes itself. */
 struct FwFile
 {
@@ -286,7 +319,11 @@ inline bool readFirmware(const std::string& path, FwFile& out, const I18n& L)
         const size_t z = out.payload.size();
         out.rawSize = (size_t)out.payload[z - 4] | ((size_t)out.payload[z - 3] << 8) |
                       ((size_t)out.payload[z - 2] << 16) | ((size_t)out.payload[z - 1] << 24);
-        out.hardware = "?";
+        // Nothing outside a packed file says what it is for, so look at the start of what is inside.
+        uint8_t head[4096];
+        const size_t got = gunzipHead(out.payload.data(), out.payload.size(), head, sizeof(head));
+        const char* chip = got ? chipOfImage(head, got) : nullptr;
+        out.hardware = chip ? chip : "?";
         out.ok = true;
         return true;
     }
