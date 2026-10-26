@@ -20,6 +20,7 @@
 #include <string>
 
 #include "Access.h"          // ftc::AccessDeps + the property-callback idiom
+#include "MfrStruct.h"
 #include "../knx_ip_tunnel.h"
 
 namespace ftc
@@ -133,9 +134,10 @@ struct BusDeviceText
     char hardwareId[41] = {0}; ///< PID_MANUFACTURER_DATA (19)
     char firmwareName[49] = {0}; ///< manufacturer specific PID 203
     char mfrDeviceName[81] = {0}; ///< manufacturer specific PID 204
-    char firmwareBuild[17] = {0}; ///< manufacturer specific PID 206, short git hash
+    char buildVersion[17] = {0};  ///< manufacturer specific PID 206, "X.Y.Z+githash"
     char mcu[17] = {0};           ///< manufacturer specific PID 207, chip the firmware is built for
     uint32_t buildTimestamp = 0;  ///< PID 205, seconds since the epoch
+    MfrStructInfo mfr;            ///< PID 202, decides whether 203 ff. are read
     uint8_t productId[10] = {0}; bool haveProductId = false; ///< PID_PRODUCT_ID (55)
     uint16_t manufacturer = 0; bool haveManufacturer = false; ///< PID_MANUFACTURER_ID (12)
     uint16_t mask = 0; bool haveMask = false;                 ///< PID_DEVICE_DESCRIPTOR (83)
@@ -145,7 +147,7 @@ struct BusDeviceText
 
     bool any() const
     {
-        return name[0] || hardwareId[0] || firmwareName[0] || mfrDeviceName[0] || firmwareBuild[0] ||
+        return name[0] || hardwareId[0] || firmwareName[0] || mfrDeviceName[0] || buildVersion[0] ||
                mcu[0] || buildTimestamp || haveProductId || havePeiType || haveMaxRetry || haveManufacturer ||
                haveMask || haveOrderInfo;
     }
@@ -179,18 +181,16 @@ inline BusDeviceText readBusDeviceText(KnxIpTunnel& tunnel, uint16_t pa, const A
         t.haveOrderInfo = true;
     }
 
-    // PIDs above 201 are manufacturer specific (03_05_01 4.3.1) and only mean what OpenKNX says they
-    // mean on an OpenKNX device. Two Siemens devices answer 203 and 204 with unrelated data, so read
-    // them only after PID_MANUFACTURER_ID confirms who is answering.
-    if (t.haveManufacturer && t.manufacturer == 0x00FA)
-    {
-        readBusText(tunnel, pa, 203, t.firmwareName, sizeof(t.firmwareName), d, timeoutMs);
-        readBusText(tunnel, pa, 204, t.mfrDeviceName, sizeof(t.mfrDeviceName), d, timeoutMs);
-        readBusText(tunnel, pa, 206, t.firmwareBuild, sizeof(t.firmwareBuild), d, timeoutMs);
-        readBusText(tunnel, pa, 207, t.mcu, sizeof(t.mcu), d, timeoutMs);
-        if (readBusProperty(tunnel, pa, 205, buf, sizeof(buf), d, timeoutMs) >= 4)
-            t.buildTimestamp = ((uint32_t)buf[0] << 24) | ((uint32_t)buf[1] << 16) | ((uint32_t)buf[2] << 8) | buf[3];
-    }
+    // PIDs above 201 are manufacturer specific (03_05_01 4.3.1). Two Siemens devices answer 203 and 204
+    // with unrelated data, so 203 ff. are read only when PID 202 names OpenKNX and marks them present.
+    const size_t structLen = readBusProperty(tunnel, pa, 202, buf, sizeof(buf), d, timeoutMs);
+    t.mfr = parseMfrStructInfo(buf, structLen);
+    if (t.mfr.has(203)) readBusText(tunnel, pa, 203, t.firmwareName, sizeof(t.firmwareName), d, timeoutMs);
+    if (t.mfr.has(204)) readBusText(tunnel, pa, 204, t.mfrDeviceName, sizeof(t.mfrDeviceName), d, timeoutMs);
+    if (t.mfr.has(206)) readBusText(tunnel, pa, 206, t.buildVersion, sizeof(t.buildVersion), d, timeoutMs);
+    if (t.mfr.has(207)) readBusText(tunnel, pa, 207, t.mcu, sizeof(t.mcu), d, timeoutMs);
+    if (t.mfr.has(205) && readBusProperty(tunnel, pa, 205, buf, sizeof(buf), d, timeoutMs) >= 4)
+        t.buildTimestamp = ((uint32_t)buf[0] << 24) | ((uint32_t)buf[1] << 16) | ((uint32_t)buf[2] << 8) | buf[3];
 
     if (readBusProperty(tunnel, pa, 55, buf, sizeof(buf), d, timeoutMs) >= sizeof(t.productId))
     {

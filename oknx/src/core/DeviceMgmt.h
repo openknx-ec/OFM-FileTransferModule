@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "Discovery.h" // ftc::detail:: socket helpers (socket_t, sockValid, sockClose, nowMs) + socket includes
+#include "MfrStruct.h"
 
 namespace ftc
 {
@@ -553,8 +554,9 @@ struct InterfaceDetails
     bool haveMfrDeviceName = false;
     char mfrDeviceName[81] = {0}; // manufacturer specific PID 204: the name PID 2 may have been overwritten
     uint32_t buildTimestamp = 0; // manufacturer specific PID 205, seconds since the epoch, 0 = not set
-    bool haveFwBuild = false;
-    char firmwareBuild[17] = {0};                     // manufacturer specific PID 206, short git hash
+    bool haveBuildVersion = false;
+    char buildVersion[17] = {0}; // manufacturer specific PID 206, "X.Y.Z+githash"
+    MfrStructInfo mfr;           // manufacturer specific PID 202, decides whether 203 ff. are read
     bool haveMcu = false;
     char mcu[17] = {0}; // manufacturer specific PID 207, chip the firmware is built for
     bool haveProductId = false;
@@ -748,7 +750,12 @@ inline bool queryInterfaceDetails(const std::string& ip, uint16_t port, Interfac
         out.haveProductId = true;
     }
 
-    if (out.manufacturer == 0x00FA && s.read(IOT_DEVICE, 1, 205, 1, d, sizeof(d), L) >= 1 && L >= 4)
+    // PIDs above 201 are manufacturer specific (03_05_01 4.3.1): 203 ff. are read only when PID 202
+    // names OpenKNX and marks them present. Two Siemens devices answer 203 and 204 with unrelated data.
+    if (s.read(IOT_DEVICE, 1, 202, 1, d, sizeof(d), L))
+        out.mfr = parseMfrStructInfo(d, L);
+
+    if (out.mfr.has(205) && s.read(IOT_DEVICE, 1, 205, 1, d, sizeof(d), L) >= 1 && L >= 4)
         out.buildTimestamp = ((uint32_t)d[0] << 24) | ((uint32_t)d[1] << 16) | ((uint32_t)d[2] << 8) | d[3];
 
     // The text Properties are arrays of 1-octet characters, so their length comes from index 0.
@@ -763,15 +770,12 @@ inline bool queryInterfaceDetails(const std::string& ip, uint16_t port, Interfac
         {19, out.hardwareId, sizeof(out.hardwareId), &out.haveHardwareId},
         {203, out.firmwareName, sizeof(out.firmwareName), &out.haveFirmwareName},
         {204, out.mfrDeviceName, sizeof(out.mfrDeviceName), &out.haveMfrDeviceName},
-        {206, out.firmwareBuild, sizeof(out.firmwareBuild), &out.haveFwBuild},
+        {206, out.buildVersion, sizeof(out.buildVersion), &out.haveBuildVersion},
         {207, out.mcu, sizeof(out.mcu), &out.haveMcu},
     };
     for (auto& t : texts)
     {
-        // PIDs above 201 are manufacturer specific (03_05_01 4.3.1): every manufacturer uses them for
-        // its own purposes. Measured on two Siemens devices, both answer 203 and 204 with unrelated
-        // data - reading them as OpenKNX text would print that as a device name.
-        if (t.pid > 201 && out.manufacturer != 0x00FA) continue;
+        if (t.pid > 201 && !out.mfr.has(t.pid)) continue;
 
         uint8_t raw[128];
         const size_t n = readPropArray(s, IOT_DEVICE, 1, t.pid, 1, raw, sizeof(raw), (uint16_t)(t.cap - 1));
