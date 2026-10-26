@@ -102,21 +102,18 @@ typedef int sock_t;
 #include "core/SelfInstall.h"
 
 /**
- * @brief "1.3.0+b90b324" - version from PID_VERSION, revision from PID_FIRMWARE_REVISION, hash from PID 206.
- * @details Nothing is read twice for this: the numbers already sit in the standard Properties, only the
- *          build hash is manufacturer specific.
+ * @brief "1.3.0+b90b324" as PID 206 carries it; without PID 206 composed from PID_VERSION and PID_FIRMWARE_REVISION.
  */
 static std::string fwVersionText(bool haveVer, uint16_t version, bool haveRev, uint16_t revision, const char* build)
 {
-    if (!haveVer) return build && build[0] ? std::string("+") + build : std::string();
+    if (build && build[0]) return std::string(build);
+    if (!haveVer) return std::string();
     const unsigned maj = (version >> 6) & 0x1F;
     const unsigned min = version & 0x3F;
     const unsigned rev = haveRev ? (unsigned)revision : (unsigned)((version >> 11) & 0x1F);
     char b[48];
     std::snprintf(b, sizeof(b), "%u.%u.%u", maj, min, rev);
-    std::string t(b);
-    if (build && build[0]) t += std::string("+") + build;
-    return t;
+    return std::string(b);
 }
 
 /** @brief A build timestamp as local time; empty when the device did not report one. */
@@ -3554,7 +3551,7 @@ static int renderInterfaceInfo(const std::string& ip, uint16_t port, bool quiet)
             p.kv(L.tr("Firmware name", "Firmware-Name"), c.txt(ftc::latin1ToUtf8(det.firmwareName)));
         if (det.haveMcu) p.kv("Chip", c.txt(ftc::latin1ToUtf8(det.mcu)));
         {
-            const std::string fv = fwVersionText(det.haveVersion, det.version, det.haveFirmware, det.firmware, det.firmwareBuild);
+            const std::string fv = fwVersionText(det.haveVersion, det.version, det.haveFirmware, det.firmware, det.buildVersion);
             if (!fv.empty()) p.kv(L.tr("Firmware build", "Firmware-Stand"), c.txt(fv));
             const std::string bt = buildTimeText(det.buildTimestamp);
             if (!bt.empty()) p.kv(L.tr("Built", "Gebaut"), c.txt(bt));
@@ -5049,7 +5046,7 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
                 if (dt.mfrDeviceName[0]) std::printf("device_name_factory\t%s\n", ftc::latin1ToUtf8(dt.mfrDeviceName).c_str());
                 if (dt.mcu[0]) std::printf("mcu\t%s\n", ftc::latin1ToUtf8(dt.mcu).c_str());
                 {
-                    const std::string fv = fwVersionText(d.haveVersion, d.version, false, 0, dt.firmwareBuild);
+                    const std::string fv = fwVersionText(d.haveVersion, d.version, false, 0, dt.buildVersion);
                     if (!fv.empty()) std::printf("firmware_build\t%s\n", fv.c_str());
                     if (dt.buildTimestamp) std::printf("build_timestamp\t%u\n", dt.buildTimestamp);
                 }
@@ -5160,7 +5157,7 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
             if (dt.firmwareName[0]) p.kv(L.tr("Firmware name", "Firmware-Name"), c.txt(ftc::latin1ToUtf8(dt.firmwareName)));
             if (dt.mcu[0]) p.kv("Chip", c.txt(ftc::latin1ToUtf8(dt.mcu)));
             {
-                const std::string fv = fwVersionText(d.haveVersion, d.version, false, 0, dt.firmwareBuild);
+                const std::string fv = fwVersionText(d.haveVersion, d.version, false, 0, dt.buildVersion);
                 if (!fv.empty()) p.kv(L.tr("Firmware build", "Firmware-Stand"), c.txt(fv));
                 const std::string bt = buildTimeText(dt.buildTimestamp);
                 if (!bt.empty()) p.kv(L.tr("Built", "Gebaut"), c.txt(bt));
