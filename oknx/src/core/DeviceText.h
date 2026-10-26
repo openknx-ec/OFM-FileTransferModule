@@ -10,8 +10,9 @@
 //
 // Two rules of the Property services shape this file:
 //   - start index 0 answers the CURRENT number of elements, as two octets (03_03_07 3.4.4.1)
-//   - the element count of A_PropertyValue_Read is a 4 bit field, so a text with one octet per
-//     element arrives in blocks of at most 15
+//   - an L_Data_Standard Frame carries at most 9 data octets in A_PropertyValue_Response (data from
+//     octet 12, 03_03_07 Fig. 47; 0...14 octets from octet 7, 03_02_02 2.2.4), so a text with one octet
+//     per element is read in blocks of 9; more needs an L_Data_Extended Frame a coupler may not pass
 
 #pragma once
 
@@ -90,8 +91,8 @@ inline size_t readBusProperty(KnxIpTunnel& tunnel, uint16_t pa, uint8_t pid, uin
 
 /**
  * @brief Read a text Property (one ISO 8859-1 octet per element) of a bus device into `out`.
- * @details Asks index 0 for the length first, then fetches in blocks of 15 - the largest a classic
- *          A_PropertyValue_Read can carry. Returns the number of characters, 0 if the Property is absent.
+ * @details Asks index 0 for the length first, then fetches in blocks of 9 - the most an answer carries
+ *          in an L_Data_Standard Frame. Returns the number of characters, 0 if the Property is absent.
  *          `out` is always NUL terminated. The octets stay ISO 8859-1; use latin1ToUtf8() to display them.
  */
 inline size_t readBusText(KnxIpTunnel& tunnel, uint16_t pa, uint8_t pid, char* out, size_t cap,
@@ -112,7 +113,7 @@ inline size_t readBusText(KnxIpTunnel& tunnel, uint16_t pa, uint8_t pid, char* o
     while (got < elements)
     {
         const uint16_t left = (uint16_t)(elements - got);
-        const uint8_t block = (uint8_t)(left > 15 ? 15 : left);
+        const uint8_t block = (uint8_t)(left > 9 ? 9 : left);
         const uint8_t n = detail::readOnce(tunnel, pa, pid, index, block, (uint8_t*)out + got, cap - 1 - got,
                                            d, timeoutMs);
         if (n == 0) break; // a device that stops answering leaves the part already read
