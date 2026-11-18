@@ -1543,16 +1543,23 @@ class Monitor
     std::string connStatus(uint8_t st, Mode mode)
     {
         char b[96];
-        const char* name = st == 0x22 ? "E_CONNECTION_TYPE" : st == 0x23 ? "E_TUNNELLING_LAYER"
+        const char* name = st == 0x22 ? "E_CONNECTION_TYPE" : st == 0x23 ? "E_CONNECTION_OPTION"
                                                           : st == 0x24   ? "E_NO_MORE_CONNECTIONS"
                                                           : st == 0x25   ? "E_NO_MORE_UNIQUE_CONNECTIONS"
-                                                          : st == 0x26   ? "E_CONNECTION_OPTION"
+                                                          : st == 0x26   ? "E_DATA_CONNECTION"
+                                                          : st == 0x27   ? "E_KNX_CONNECTION"
+                                                          : st == 0x28   ? "E_AUTHORISATION_ERROR"
                                                           : st == 0x29   ? "E_TUNNELLING_LAYER"
+                                                          : st == 0x2D   ? "E_NO_TUNNELLING_ADDRESS"
+                                                          : st == 0x2E   ? "E_CONNECTION_IN_USE"
                                                                          : "E_*";
-        if (mode == Mode::Bus)
+        if (st == 0x27)
             std::snprintf(b, sizeof(b), "0x%02X %s%s", st, name,
-                          _i.tr(" — a busmonitor already owns this subnet (exclusive)",
-                                " — ein Busmonitor belegt dieses Subnetz bereits (exklusiv)"));
+                          _i.tr(" — the device has no connection to the KNX line", " — das Gerät hat keine Verbindung zur KNX-Linie"));
+        else if (mode == Mode::Bus && st == 0x24)
+            std::snprintf(b, sizeof(b), "0x%02X %s%s", st, name,
+                          _i.tr(" — a busmonitor owns this subnet, or the last one is still closing",
+                                " — ein Busmonitor belegt das Subnetz oder der letzte endet noch"));
         else
             std::snprintf(b, sizeof(b), "0x%02X %s", st, name);
         return b;
