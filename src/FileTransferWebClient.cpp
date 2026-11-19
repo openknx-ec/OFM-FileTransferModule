@@ -11,6 +11,7 @@
     #ifdef OPENKNX_EXTFLASH
         #include "EfcFileStore.h"
     #endif
+    #include "OpenKNX/Network/Webserver/BoundedText.h"
     #include "knx/config.h"
     #ifdef KNX_HAS_TP
         #include "knx.h"
@@ -18,6 +19,7 @@
 
 FileTransferWebClient openknxFtcWeb;
 
+using OpenKNX::Network::BoundedText;
 using OpenKNX::Network::WebRequest;
 using OpenKNX::Network::WebResponse;
 using OpenKNX::Network::Webserver;
@@ -41,27 +43,119 @@ std::string FileTransferWebClient::paText(uint16_t pa)
 }
 
 // Device text goes into JSON: one stray quote or backslash from a path would break the whole answer.
-static std::string jsonEsc(const char *v)
+// Writes at most 2 * strlen(v) + 1 bytes; out of cap bytes, never more.
+static const char *jsonEsc(char *out, size_t cap, const char *v)
 {
-    std::string o;
+    size_t n = 0;
+    for (const char *p = v; p && *p && n + 2 < cap; p++)
+    {
+        if ((uint8_t)*p < 0x20) continue;
+        if (*p == '"' || *p == '\\') out[n++] = '\\';
+        out[n++] = *p;
+    }
+    out[n] = '\0';
+    return out;
+}
+
+// The same, straight into the answer
+static void addJsonEsc(BoundedText &t, const char *v)
+{
     for (const char *p = v; p && *p; p++)
     {
-        if (*p == '"' || *p == '\\') o += '\\';
-        else if ((uint8_t)*p < 0x20) continue;
-        o += *p;
+        if ((uint8_t)*p < 0x20) continue;
+        if (*p == '"' || *p == '\\') t += '\\';
+        t += *p;
     }
-    return o;
 }
 
 // Sizes the way the file manager shows them -- a raw byte count says little about a 1 MB image.
-static std::string fmtSize(uint32_t b)
+static void fmtSize(char *t, size_t len, uint32_t b)
 {
-    char t[24];
-    if (b >= 1048576u) snprintf(t, sizeof(t), "%.1f MB", b / 1048576.0);
-    else if (b >= 1024u) snprintf(t, sizeof(t), "%.1f KB", b / 1024.0);
-    else snprintf(t, sizeof(t), "%u B", (unsigned)b);
-    return t;
+    if (b >= 1048576u) snprintf(t, len, "%.1f MB", b / 1048576.0);
+    else if (b >= 1024u) snprintf(t, len, "%.1f KB", b / 1024.0);
+    else snprintf(t, len, "%u B", (unsigned)b);
 }
+
+// The /knxota/status answer in parts. Its size bound (ST_FIXED, ST_PER_HIT) is built from these formats: every
+// conversion takes 2 format bytes or more, so sizeof(format) plus the widest value of each field covers the text.
+static const char ST_MAIN[] = "{\"phase\":\"%s\",\"busy\":%s,\"ok\":%s,\"unconfirmed\":%s,\"message\":\"%s\","
+                              "\"done\":%u,\"total\":%u,\"bps\":%u,\"chunk\":%u,\"chunks\":%u,"
+                              "\"window\":%u,\"windowState\":%u,\"target\":\"%s\","
+                              "\"resends\":%u,\"verifies\":%u,\"crcErrors\":%u";
+static const char ST_BAUD[] = ",\"baud\":%d";
+static const char ST_AUTH[] = ",\"auth\":{\"state\":\"%s\",\"wait\":%u,\"pa\":\"%s\"}";
+// `feat` stays what the device REPORTED; `can` is what it can, which on a legacy server
+// is derived from its version because it has no CheckFeatures to answer with. The page
+// greys out on `can` and shows `legacy` -- otherwise a zero byte reads as "can nothing".
+static const char ST_DEV[] = ",\"dev\":{\"pa\":\"%s\",\"cls\":\"%s\",\"mask\":%u,\"ftm\":%u,\"feat\":%u,"
+                             "\"can\":%u,\"legacy\":%s,\"derived\":%s,"
+                             "\"prog\":%s,\"mfr\":%u,\"apdu\":%u,\"router\":%s";
+static const char ST_ORDER[] = ",\"order\":\"%s\"";
+static const char ST_APPVER[] = ",\"appVer\":\"%u.%u\"";
+static const char ST_SERIAL[] = ",\"serial\":\"%02X %02X %02X %02X %02X %02X\"";
+static const char ST_HW[] = ",\"hw\":\"%02X %02X %02X %02X %02X %02X\"";
+static const char ST_VOLT[] = ",\"volt\":%u";
+static const char ST_TABS[] = ",\"tabs\":[%u,%u,%u,%u]}";
+static const char ST_SCAN[] = ",\"scan\":{\"running\":%s,\"complete\":%s,\"found\":%u,\"max\":%u,\"at\":\"%s\","
+                              "\"done\":%u,\"total\":%u,\"hits\":[";
+static const char ST_HIT[] = "%s{\"pa\":\"%s\",\"mask\":%u,\"ok\":%s,\"id\":\"%s\"}";
+static const char ST_DRIVE[] = "%s{\"state\":%u,\"total\":%u,\"free\":%u,\"kb\":%s}";
+static const char ST_DRIVES[] = "]},\"drives\":[],\"drivesPa\":\"%s\",\"drivesBusy\":%s"; // hits end, drives open, drives end: bound only
+static const char ST_GA[] = ",\"ga\":{\"pa\":\"%s\",\"lost\":%s,\"cut\":%s,\"n\":%u,\"ver\":%lu}"; // rows: /knxota/garows
+static const char ST_GA_ROW[] = "%s{\"ga\":%u,\"co\":%u,\"flags\":%u,\"prio\":%u,\"size\":%u,\"cfg\":%s,\"unk\":%s}";
+static const char ST_RESULT[] = ",\"result\":{\"kind\":%u,\"ok\":%s,\"pa\":\"%s\",\"bytes\":%u,\"chunks\":%u,"
+                                "\"ms\":%u,\"bps\":%u,\"verify\":%u,\"mode\":%u,\"resumed\":%u,\"retries\":%u,"
+                                "\"cleanup\":%u,\"file\":\"%s\",\"apply\":%s}";
+static const char ST_END[] = "}"; // answer end: bound only
+
+// Widest value per conversion: "false" or "upload" 6, a PA "15.15.255" 9, 32 bit 10, 16 bit 5, 8 bit 3, int 11
+static constexpr size_t W_WORD = 6, W_PA = 9, W_U32 = 10, W_U16 = 5, W_U8 = 3, W_INT = 11;
+static constexpr size_t esc(size_t field) { return 2 * (field - 1); } // a char[] field, escaped
+static constexpr size_t ST_FIXED =
+    sizeof(ST_MAIN) + 4 * W_WORD + esc(sizeof(FtcStatus::message)) + 2 * W_U32 + 4 * W_U16 + W_U8 + W_PA + 3 * W_U16 +
+    sizeof(ST_BAUD) + W_INT +
+    sizeof(ST_AUTH) + W_WORD + 2 + W_U16 + W_PA + // "noanswer" is 8
+    sizeof(ST_DEV) + W_PA + esc(sizeof(FtcDeviceInfo::cls)) + 2 * W_U16 + W_U32 + W_U8 + 3 * W_WORD + 2 * W_U16 + W_WORD +
+    sizeof(ST_ORDER) + esc(sizeof(FtcDeviceInfo::order)) + sizeof(ST_APPVER) + 2 * W_U8 + sizeof(ST_SERIAL) + sizeof(ST_HW) +
+    sizeof(ST_VOLT) + W_U16 + sizeof(ST_TABS) + 4 * W_U8 +
+    sizeof(ST_SCAN) + 2 * W_WORD + 2 * W_U16 + W_PA + 2 * W_U32 +
+    sizeof(ST_DRIVES) + W_PA + W_WORD + 3 * (sizeof(ST_DRIVE) + W_U8 + 2 * W_U32 + W_WORD) +
+    sizeof(ST_GA) + W_PA + 2 * W_WORD + W_U16 + W_U32 +
+    sizeof(ST_RESULT) + W_U8 + W_WORD + W_PA + W_U32 + W_U16 + 2 * W_U32 + 2 * W_U8 + W_U32 + W_U16 + W_U8 +
+    esc(sizeof(FtcTransferSetup::local)) + W_WORD +
+    sizeof(ST_END);
+static constexpr size_t ST_PER_HIT = sizeof(ST_HIT) + 1 + W_PA + W_U16 + W_WORD + esc(sizeof(FtcEntry::okId));
+static constexpr size_t ST_PER_GA = sizeof(ST_GA_ROW) + 1 + 2 * W_U16 + 3 * W_U8 + 2 * W_WORD;
+
+// /knxota/garows: at most GA_PAGE_ROWS rows per answer; a 4.1 KB block for at most 3.4 KB of text
+static const char GA_PAGE[] = "{\"pa\":\"%s\",\"from\":%u,\"n\":%u,\"ver\":%lu,\"rows\":[";
+static constexpr uint16_t GA_PAGE_ROWS = 40;
+static constexpr size_t GA_PAGE_FIXED = sizeof(GA_PAGE) + W_PA + 2 * W_U16 + W_U32 + sizeof("]}");
+
+/** @brief Version of the group-address rows: the page fetches them again only when it changes (read running, new read). */
+static uint32_t gaVersion(const FtcGaEntry *ga, uint16_t n, uint16_t pa, bool cut)
+{
+    uint32_t h = 2166136261u;
+    auto mix = [&h](uint32_t v) { h = (h ^ v) * 16777619u; };
+    mix(pa | (uint32_t)n << 16);
+    mix(cut ? 1 : 0);
+    for (uint16_t i = 0; i < n; i++)
+    {
+        mix(ga[i].ga | (uint32_t)ga[i].co << 16);
+        mix(ga[i].flags | (uint32_t)ga[i].prio << 8 | (uint32_t)ga[i].sizeCode << 16 | (uint32_t)ga[i].cfgValid << 24 |
+            (uint32_t)ga[i].gaUnknown << 25);
+    }
+    return h;
+}
+
+// /knxota/files: one block of at most this size; files beyond it are left out and the answer carries X-List-Cut
+    #ifndef OPENKNX_FTC_WEB_FILES_BUF
+        #ifdef ARDUINO_ARCH_RP2040
+            #define OPENKNX_FTC_WEB_FILES_BUF 4096
+        #else
+            #define OPENKNX_FTC_WEB_FILES_BUF 16384
+        #endif
+    #endif
 
 // ── Page ───────────────────────────────────────────────────────────────────────────────────────
 void FileTransferWebClient::handlePage(WebRequest &req, WebResponse &res)
@@ -172,6 +266,7 @@ void FileTransferWebClient::collectDriveAnswer()
 // ── Status: what the client really holds -- no field is served that is not backed by its state ─
 void FileTransferWebClient::handleStatus(WebRequest &req, WebResponse &res)
 {
+    static_assert(sizeof(ScanHit::okId) == sizeof(FtcEntry::okId), "ST_PER_HIT sizes a hit with FtcEntry::okId");
     auto *c = FileTransferClient::instance();
     const FtcStatus &s = c->status();
     collectScanHits();
@@ -192,28 +287,27 @@ void FileTransferWebClient::handleStatus(WebRequest &req, WebResponse &res)
         default: break;
     }
 
-    char buf[512];
-    std::string out = "{";
-    snprintf(buf, sizeof(buf),
-             "\"phase\":\"%s\",\"busy\":%s,\"ok\":%s,\"unconfirmed\":%s,\"message\":\"%s\","
-             "\"done\":%u,\"total\":%u,\"bps\":%u,\"chunk\":%u,\"chunks\":%u,"
-             "\"window\":%u,\"windowState\":%u,\"target\":\"%s\","
-             "\"resends\":%u,\"verifies\":%u,\"crcErrors\":%u",
-             ph, c->isBusy() ? "true" : "false", s.ok ? "true" : "false", s.unconfirmed ? "true" : "false",
-             jsonEsc(s.message).c_str(),
-             (unsigned)s.done, (unsigned)s.total, (unsigned)s.bps, (unsigned)s.chunk,
-             (unsigned)s.chunks, (unsigned)s.window, (unsigned)s.windowState,
-             paText(s.target).c_str(), (unsigned)s.resends, (unsigned)s.verifies,
-             (unsigned)s.crcErrors);
-    out += buf;
+    // One block for the whole answer, sized before it is written: polled every 0.9 s, it must not grow a string
+    uint16_t gaN = 0;
+    const FtcGaEntry *ga = c->groupObjects(gaN);
+    const bool gaShown = !(_gaLost && _gaPa);
+    if (!gaShown) gaN = 0;
+    BoundedText out(ST_FIXED + _scanHits.size() * ST_PER_HIT);
+    if (out.failed())
+    {
+        res.sendOutOfMemory();
+        return;
+    }
+    char esc1[2 * FTC_PATH_MAX];
+    out.addf(ST_MAIN, ph, c->isBusy() ? "true" : "false", s.ok ? "true" : "false", s.unconfirmed ? "true" : "false",
+             jsonEsc(esc1, sizeof(esc1), s.message), (unsigned)s.done, (unsigned)s.total, (unsigned)s.bps,
+             (unsigned)s.chunk, (unsigned)s.chunks, (unsigned)s.window, (unsigned)s.windowState,
+             paText(s.target).c_str(), (unsigned)s.resends, (unsigned)s.verifies, (unsigned)s.crcErrors);
 
 #ifdef KNX_HAS_TP
     // The baud rate of this device's bus chip bounds the rate a transfer reaches; the page forecasts with it.
     if (TpUartDataLinkLayer *dll = KNX_TP_DLL)
-    {
-        snprintf(buf, sizeof(buf), ",\"baud\":%d", dll->getTPUart().getBaudrate());
-        out += buf;
-    }
+        out.addf(ST_BAUD, dll->getTPUart().getBaudrate());
 #endif
 
 #ifdef OPENKNX_FTC_SECURITY
@@ -231,9 +325,7 @@ void FileTransferWebClient::handleStatus(WebRequest &req, WebResponse &res)
             case FileTransferClient::FtcAuthNoAnswer: as = "noanswer"; break;
             default: break;
         }
-        snprintf(buf, sizeof(buf), ",\"auth\":{\"state\":\"%s\",\"wait\":%u,\"pa\":\"%s\"}", as,
-                 (unsigned)c->authBackoffSeconds(), paText(_authPa).c_str());
-        out += buf;
+        out.addf(ST_AUTH, as, (unsigned)c->authBackoffSeconds(), paText(_authPa).c_str());
     }
 #endif
 
@@ -244,131 +336,126 @@ void FileTransferWebClient::handleStatus(WebRequest &req, WebResponse &res)
     const bool devFresh = d.valid && _featPa && s.target == _featPa;
     if (devFresh)
     {
-        snprintf(buf, sizeof(buf),
-                 // `feat` stays what the device REPORTED; `can` is what it can, which on a legacy server
-                 // is derived from its version because it has no CheckFeatures to answer with. The page
-                 // greys out on `can` and shows `legacy` -- otherwise a zero byte reads as "can nothing".
-                 ",\"dev\":{\"pa\":\"%s\",\"cls\":\"%s\",\"mask\":%u,\"ftm\":%u,\"feat\":%u,"
-                 "\"can\":%u,\"legacy\":%s,\"derived\":%s,"
-                 "\"prog\":%s,\"mfr\":%u,\"apdu\":%u,\"router\":%s",
-                 paText(_featPa).c_str(), jsonEsc(d.cls).c_str(), (unsigned)d.mask,
-                 (unsigned)d.ftmVersion, (unsigned)d.features,
-                 (unsigned)d.ftmCan, d.ftmLegacy ? "true" : "false", d.ftmDerived ? "true" : "false",
-                 d.progMode ? "true" : "false",
-                 (unsigned)d.manufacturer, (unsigned)d.maxApdu, d.isRouter ? "true" : "false");
-        out += buf;
-        if (d.haveOrder) { out += ",\"order\":\""; out += jsonEsc(d.order); out += "\""; }
-        if (d.haveVersion)
-        {
-            snprintf(buf, sizeof(buf), ",\"appVer\":\"%u.%u\"", (unsigned)((d.version >> 6) & 0x1F),
-                     (unsigned)(d.version & 0x3F));
-            out += buf;
-        }
+        out.addf(ST_DEV, paText(_featPa).c_str(), jsonEsc(esc1, sizeof(esc1), d.cls), (unsigned)d.mask,
+                 (unsigned)d.ftmVersion, (unsigned)d.features, (unsigned)d.ftmCan, d.ftmLegacy ? "true" : "false",
+                 d.ftmDerived ? "true" : "false", d.progMode ? "true" : "false", (unsigned)d.manufacturer,
+                 (unsigned)d.maxApdu, d.isRouter ? "true" : "false");
+        if (d.haveOrder) out.addf(ST_ORDER, jsonEsc(esc1, sizeof(esc1), d.order));
+        if (d.haveVersion) out.addf(ST_APPVER, (unsigned)((d.version >> 6) & 0x1F), (unsigned)(d.version & 0x3F));
         if (d.haveSerial)
-        {
-            out += ",\"serial\":\"";
-            for (int i = 0; i < 6; i++) { snprintf(buf, sizeof(buf), "%s%02X", i ? " " : "", d.serial[i]); out += buf; }
-            out += "\"";
-        }
+            out.addf(ST_SERIAL, d.serial[0], d.serial[1], d.serial[2], d.serial[3], d.serial[4], d.serial[5]);
         if (d.haveHw)
-        {
-            out += ",\"hw\":\"";
-            for (int i = 0; i < 6; i++) { snprintf(buf, sizeof(buf), "%s%02X", i ? " " : "", d.hardware[i]); out += buf; }
-            out += "\"";
-        }
-        if (d.haveBusVolt) { snprintf(buf, sizeof(buf), ",\"volt\":%u", (unsigned)d.busVoltmV); out += buf; }
-        snprintf(buf, sizeof(buf), ",\"tabs\":[%u,%u,%u,%u]}", (unsigned)d.appState,
-                 (unsigned)d.addrTableState, (unsigned)d.assocTableState, (unsigned)d.goTableState);
-        out += buf;
+            out.addf(ST_HW, d.hardware[0], d.hardware[1], d.hardware[2], d.hardware[3], d.hardware[4], d.hardware[5]);
+        if (d.haveBusVolt) out.addf(ST_VOLT, (unsigned)d.busVoltmV);
+        out.addf(ST_TABS, (unsigned)d.appState, (unsigned)d.addrTableState, (unsigned)d.assocTableState,
+                 (unsigned)d.goTableState);
     }
 
-    snprintf(buf, sizeof(buf),
-             ",\"scan\":{\"running\":%s,\"complete\":%s,\"found\":%u,\"max\":%u,\"at\":\"%s\","
-             "\"done\":%u,\"total\":%u,\"hits\":[",
-             s.phase == FtcPhase::Scan ? "true" : "false",
+    out.addf(ST_SCAN, s.phase == FtcPhase::Scan ? "true" : "false",
              // Whether the sweep ran to its end is the device's fact: a page that reloads mid-scan has
              // no way to know it otherwise, and that is exactly the case this view advertises.
-             (s.phase != FtcPhase::Scan && _scanDone) ? "true" : "false",
-             (unsigned)c->scanFound(), (unsigned)SCAN_HIT_MAX,
-             paText(c->scanCurrentPa()).c_str(),
+             (s.phase != FtcPhase::Scan && _scanDone) ? "true" : "false", (unsigned)c->scanFound(),
+             (unsigned)SCAN_HIT_MAX, paText(c->scanCurrentPa()).c_str(),
              (unsigned)(s.phase == FtcPhase::Scan ? s.done : _scanLastDone),
              (unsigned)(s.phase == FtcPhase::Scan ? s.total : _scanLastTotal));
-    out += buf;
     for (size_t i = 0; i < _scanHits.size(); i++)
-    {
-        snprintf(buf, sizeof(buf), "%s{\"pa\":\"%s\",\"mask\":%u,\"ok\":%s,\"id\":\"%s\"}", i ? "," : "",
-                 paText(_scanHits[i].pa).c_str(), (unsigned)_scanHits[i].mask,
-                 _scanHits[i].openKnx ? "true" : "false", jsonEsc(_scanHits[i].okId).c_str());
-        out += buf;
-    }
+        out.addf(ST_HIT, i ? "," : "", paText(_scanHits[i].pa).c_str(), (unsigned)_scanHits[i].mask,
+                 _scanHits[i].openKnx ? "true" : "false", jsonEsc(esc1, sizeof(esc1), _scanHits[i].okId));
     out += "]}";
 
     // The target's drives, as far as they were asked for. Never a guess: state 0 means "not asked".
     out += ",\"drives\":[";
     for (int i = 0; i < 3; i++)
-    {
-        snprintf(buf, sizeof(buf), "%s{\"state\":%u,\"total\":%u,\"free\":%u,\"kb\":%s}",
-                 i ? "," : "", (unsigned)_drv[i].state, (unsigned)_drv[i].total,
-                 (unsigned)_drv[i].free, _drv[i].kb ? "true" : "false");
-        out += buf;
-    }
-    snprintf(buf, sizeof(buf), "],\"drivesPa\":\"%s\",\"drivesBusy\":%s",
-             paText(_drvPa).c_str(), _dfPending >= 0 ? "true" : "false");
-    out += buf;
+        out.addf(ST_DRIVE, i ? "," : "", (unsigned)_drv[i].state, (unsigned)_drv[i].total, (unsigned)_drv[i].free,
+                 _drv[i].kb ? "true" : "false");
+    out.addf("],\"drivesPa\":\"%s\",\"drivesBusy\":%s", paText(_drvPa).c_str(), _dfPending >= 0 ? "true" : "false");
 
     // Group addresses: served straight from the client, because it keeps them -- but its storage is
     // shared with the fast-upload bitmap, so a transfer invalidates them and the page says so.
-    uint16_t gaN = 0;
-    const FtcGaEntry *ga = c->groupObjects(gaN);
     // "cut" is what the console prints as INCOMPLETE: the rows are a PREFIX of the device's tables.
     // Without it the page showed a partial read as a complete one - the failure this flag exists for.
-    snprintf(buf, sizeof(buf), ",\"ga\":{\"pa\":\"%s\",\"lost\":%s,\"cut\":%s,\"rows\":[",
-             paText(_gaPa).c_str(), (_gaLost && _gaPa) ? "true" : "false",
-             c->groupObjectsTruncated() ? "true" : "false");
-    out += buf;
-    if (!(_gaLost && _gaPa))
-        for (uint16_t i = 0; i < gaN; i++)
-        {
-            // "unk" per ROW: ga 0 means "no group address" unless this row's TSAP pointed past an address
-            // table that stayed silent. A run-wide flag marked empty rows as unreadable.
-            snprintf(buf, sizeof(buf), "%s{\"ga\":%u,\"co\":%u,\"flags\":%u,\"prio\":%u,\"size\":%u,\"cfg\":%s,\"unk\":%s}",
-                     i ? "," : "", (unsigned)ga[i].ga, (unsigned)ga[i].co, (unsigned)ga[i].flags,
-                     (unsigned)ga[i].prio, (unsigned)ga[i].sizeCode, ga[i].cfgValid ? "true" : "false",
-                     ga[i].gaUnknown ? "true" : "false");
-            out += buf;
-        }
-    out += "]}";
+    const bool gaCut = c->groupObjectsTruncated();
+    out.addf(ST_GA, paText(_gaPa).c_str(), gaShown ? "false" : "true", gaCut ? "true" : "false", (unsigned)gaN,
+             (unsigned long)gaVersion(ga, gaN, _gaPa, gaCut));
 
     // The finished job, for the summary. Set once at the end of a transfer and kept until the next one.
     const FtcTransferResult &r = c->transferResult();
     const FtcTransferSetup &u = c->transferSetup();
     if (r.valid)
-    {
-        snprintf(buf, sizeof(buf),
-                 ",\"result\":{\"kind\":%u,\"ok\":%s,\"pa\":\"%s\",\"bytes\":%u,\"chunks\":%u,"
-                 "\"ms\":%u,\"bps\":%u,\"verify\":%u,\"mode\":%u,\"resumed\":%u,\"retries\":%u,"
-                 "\"cleanup\":%u,\"file\":\"%s\",\"apply\":%s}",
-                 (unsigned)r.kind, r.ok ? "true" : "false", paText(r.target).c_str(),
-                 (unsigned)r.bytes, (unsigned)r.chunks, (unsigned)r.elapsedMs, (unsigned)r.avgBps,
-                 (unsigned)r.verify, (unsigned)r.mode, (unsigned)r.resumedBytes, (unsigned)r.retries,
-                 (unsigned)r.cleanup, jsonEsc(u.valid ? u.local : "").c_str(), u.willApply ? "true" : "false");
-        out += buf;
-    }
+        out.addf(ST_RESULT, (unsigned)r.kind, r.ok ? "true" : "false", paText(r.target).c_str(), (unsigned)r.bytes,
+                 (unsigned)r.chunks, (unsigned)r.elapsedMs, (unsigned)r.avgBps, (unsigned)r.verify, (unsigned)r.mode,
+                 (unsigned)r.resumedBytes, (unsigned)r.retries, (unsigned)r.cleanup,
+                 jsonEsc(esc1, sizeof(esc1), u.valid ? u.local : ""), u.willApply ? "true" : "false");
 
     out += "}";
+    if (out.cut())
+    {
+        // the bound above is wrong: a cut JSON would only break the page
+        logError("knxOTA", "status answer exceeds its bound (%u B)", (unsigned)out.size());
+        res.sendOutOfMemory();
+        return;
+    }
     res.setContentType("application/json");
-    res.send(out.c_str());
+    int len = 0;
+    uint8_t *body = out.take(len);
+    res.sendOwned(body, len);
 }
 
 
-// ── Local file list: own walk, so the KNX-side directory cursor is never disturbed ─────────────
+// ── Group-address rows in pages; the status carries only their count and version ─────────────────
+void FileTransferWebClient::handleGaRows(WebRequest &req, WebResponse &res)
+{
+    auto *c = FileTransferClient::instance();
+    uint16_t gaN = 0;
+    const FtcGaEntry *ga = c->groupObjects(gaN);
+    if (_gaLost && _gaPa) gaN = 0; // a fast transfer reused the storage
+    unsigned long from = strtoul(req.getQueryParam("from").c_str(), nullptr, 10);
+    if (from > gaN) from = gaN;
+    const uint16_t end = (gaN - from > GA_PAGE_ROWS) ? (uint16_t)(from + GA_PAGE_ROWS) : gaN;
+    BoundedText out(GA_PAGE_FIXED + (end - from) * ST_PER_GA);
+    if (out.failed())
+    {
+        res.sendOutOfMemory();
+        return;
+    }
+    const bool gaCut = c->groupObjectsTruncated();
+    out.addf(GA_PAGE, paText(_gaPa).c_str(), (unsigned)from, (unsigned)gaN, (unsigned long)gaVersion(ga, gaN, _gaPa, gaCut));
+    for (uint16_t i = from; i < end; i++)
+    {
+        // "unk" per ROW: ga 0 means "no group address" unless this row's TSAP pointed past an address
+        // table that stayed silent. A run-wide flag marked empty rows as unreadable.
+        out.addf(ST_GA_ROW, i > from ? "," : "", (unsigned)ga[i].ga, (unsigned)ga[i].co, (unsigned)ga[i].flags,
+                 (unsigned)ga[i].prio, (unsigned)ga[i].sizeCode, ga[i].cfgValid ? "true" : "false",
+                 ga[i].gaUnknown ? "true" : "false");
+    }
+    out += "]}";
+    if (out.cut())
+    {
+        logError("knxOTA", "ga rows exceed their bound (%u B)", (unsigned)out.size());
+        res.sendOutOfMemory();
+        return;
+    }
+    res.setContentType("application/json");
+    int len = 0;
+    uint8_t *body = out.take(len);
+    res.sendOwned(body, len);
+}
+
+// ── Local file list: every drive walks with its own handle, the KNX-side listing keeps its cursor ──────
 void FileTransferWebClient::handleFiles(WebRequest &req, WebResponse &res)
 {
     const std::string fs = req.getQueryParam("fs");
     const std::string job = req.getQueryParam("job");
     const bool wantDelta = (job == "delta");
-    std::string out = "[";
+    BoundedText out(OPENKNX_FTC_WEB_FILES_BUF, 1024); // a smaller block when the heap has no large one: fewer files
+    if (out.failed())
+    {
+        res.sendOutOfMemory();
+        return;
+    }
+    out += "[";
     bool first = true;
+    bool cut = false;
     // The tab decides what belongs in the list: .okd is a patch, everything else must at least look
     // like an image. The accepted endings are named on the page, so nothing vanishes without a word.
     auto endsWith = [](const char *name, const char *ext) {
@@ -376,53 +463,74 @@ void FileTransferWebClient::handleFiles(WebRequest &req, WebResponse &res)
         return n > e && strcasecmp(name + n - e, ext) == 0;
     };
     auto add = [&](const char *name, uint32_t size) {
+        if (cut) return;
         const bool okd = endsWith(name, ".okd");
         if (okd != wantDelta) return;
         if (!wantDelta && !(endsWith(name, ".bin") || endsWith(name, ".uf2") || endsWith(name, ".gz")))
             return;
+        const size_t mark = out.size();
         if (!first) out += ",";
-        first = false;
         out += "{\"name\":\"";
-        out += name;
-        out += "\",\"size\":\"" + fmtSize(size) + "\",\"bytes\":" + std::to_string(size) + "}";
+        addJsonEsc(out, name);
+        char sz[24];
+        fmtSize(sz, sizeof(sz), size);
+        out.addf("\",\"size\":\"%s\",\"bytes\":%u}", sz, (unsigned)size);
+        if (!out.cut() && out.room() >= 1) // the closing bracket still fits
+        {
+            first = false;
+            return;
+        }
+        out.rollback(mark);
+        cut = true;
     };
+#if defined(OPENKNX_SDCARD) || defined(OPENKNX_EXTFLASH)
+    // sd/efc: one pass with its own handle; the store cursor of a running FTC listing stays untouched, no snapshot on the heap
+    struct Walk
+    {
+        decltype(add) *addFn;
+        bool *cut;
+        uint16_t seen;
+    } w{&add, &cut, 0};
+    bool (*cb)(void *, const char *, bool, uint64_t) = [](void *c, const char *n, bool isDir, uint64_t sz) -> bool {
+        Walk *w = static_cast<Walk *>(c);
+        if (++w->seen > 512) // the loop must not walk a huge directory in one pass
+        {
+            *w->cut = true;
+            return false;
+        }
+        if (!isDir) (*w->addFn)(n, sz > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)sz);
+        return !*w->cut; // the answer is full
+    };
+#endif
     if (fs == "sd")
     {
 #ifdef OPENKNX_SDCARD
-        char nm[64];
-        if (sd::fileStore.dirOpen("/"))
-        {
-            struct DirClose { ~DirClose() { sd::fileStore.dirClose(); } } dirClose; // also when add() throws
-            int t;
-            uint32_t sz = 0;
-            while ((t = sd::fileStore.dirNext(nm, sizeof(nm), &sz)) > 0)
-                if (t == 1) add(nm, sz);
-        }
+        sd::fileStore.forEach("/", cb, &w, &cut); // also cut: the card went away during the listing
 #endif
     }
     else if (fs == "efc")
     {
 #ifdef OPENKNX_EXTFLASH
-        char nm[64];
-        if (efc::fileStore.dirOpen("/"))
-        {
-            struct DirClose { ~DirClose() { efc::fileStore.dirClose(); } } dirClose; // also when add() throws
-            int t;
-            uint32_t sz = 0;
-            while ((t = efc::fileStore.dirNext(nm, sizeof(nm), &sz)) > 0)
-                if (t == 1) add(nm, sz);
-        }
+        efc::fileStore.forEach("/", cb, &w);
 #endif
     }
     else
     {
         File d = LittleFS.open("/", "r");
-        for (File f = d.openNextFile(); f; f = d.openNextFile())
+        for (File f = d.openNextFile(); f && !cut; f = d.openNextFile())
             if (!f.isDirectory()) add(f.name(), (uint32_t)f.size());
     }
     out += "]";
     res.setContentType("application/json");
-    res.send(out.c_str());
+    if (cut)
+    {
+        // no list entry for it: the page would offer it as a file
+        res.setHeader("X-List-Cut", "1");
+        logWarning("knxOTA", "file list cut at %u B", (unsigned)out.size());
+    }
+    int len = 0;
+    uint8_t *body = out.take(len);
+    res.sendOwned(body, len);
 }
 
 
@@ -727,6 +835,7 @@ void FileTransferWebClient::setup()
     // the routes below touch the client state: their handlers run in the loop task (ESP32: not in httpd)
     openknxNetwork.webserver.addLoopRoute(WEB_GET, "/knxota/status", [this](WebRequest &q, WebResponse &r) { handleStatus(q, r); });
     openknxNetwork.webserver.addLoopRoute(WEB_GET, "/knxota/files", [this](WebRequest &q, WebResponse &r) { handleFiles(q, r); });
+    openknxNetwork.webserver.addLoopRoute(WEB_GET, "/knxota/garows", [this](WebRequest &q, WebResponse &r) { handleGaRows(q, r); });
     openknxNetwork.webserver.addLoopRoute(WEB_POST, "/knxota/start", [this](WebRequest &q, WebResponse &r) { handleStart(q, r); });
     openknxNetwork.webserver.addLoopRoute(WEB_POST, "/knxota/cancel", [this](WebRequest &q, WebResponse &r) { handleCancel(q, r); });
     openknxNetwork.webserver.addLoopRoute(WEB_POST, "/knxota/trigger", [this](WebRequest &q, WebResponse &r) { handleTrigger(q, r); });

@@ -82,7 +82,8 @@ stay responsive.
 | Route | Purpose |
 |---|---|
 | `GET /knxota` | the page shell; everything the user sees is built in the browser from the embedded JS |
-| `GET /knxota/status` | the one polled endpoint: phase, busy, ok, message, progress, device, scan hits, drives, GA, result |
+| `GET /knxota/status` | the one polled endpoint: phase, busy, ok, message, progress, device, scan hits, drives, GA count and version, result |
+| `GET /knxota/garows?from=N` | up to 40 group-address rows from N; the page fetches them only when the version in the status changed |
 | `GET /knxota/files` | the source listing per drive |
 | `GET /assets/knxota.js` · `.css` | the two gzipped blobs the page is made of |
 | `POST /knxota/start` | arm a transfer |

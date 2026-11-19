@@ -28,7 +28,7 @@ function otaBuild() {
   + (f.efc === "1" ? OTA_HTML.EFC : "") + OTA_HTML.D;
 }
 
-let otaStep = 1, otaJob = "full", otaFs = "int", otaSel = null, otaFast = false, otaFiles = [];
+let otaStep = 1, otaJob = "full", otaFs = "int", otaSel = null, otaFast = false, otaFiles = [], otaFilesNote = "", otaFilesSeq = 0;
 // Gepackte FTM-Version (major<<8 | minor<<4 | revision) als Text.
 const otaFtmText = v => v ? ((v >> 8) + "." + ((v >> 4) & 0x0F) + "." + (v & 0x0F)) : "?";
 // Was das Ziel KANN. Ein FTM vor 0.1.0 hat kein CheckFeatures, `can` ist dort aus seiner Version abgeleitet;
@@ -63,7 +63,8 @@ function otaLog(t, c) {
   const d = document.createElement("div");
   const now = new Date();
   const hm = String(now.getHours()).padStart(2, "0") + ":" + String(now.getMinutes()).padStart(2, "0");
-  d.innerHTML = '<span class="gray">' + hm + '</span>  ' + (c ? '<span class="' + c + '">' + t + '</span>' : t);
+  const te = otaEsc(t); // texts carry device and server messages: data, not markup
+  d.innerHTML = '<span class="gray">' + hm + '</span>  ' + (c ? '<span class="' + c + '">' + te + '</span>' : te);
   _o("otaLog").appendChild(d);
   _o("otaLog").scrollTop = 1e5;
 }
@@ -177,8 +178,19 @@ async function otaLoadFiles() {
   const tb = _o("otaFiles");
   tb.innerHTML = '<tr><td colspan="2" class="gray">lädt …</td></tr>';
   _o("otaNoFile").classList.add("fm-hidden");
-  try { otaFiles = await (await fetch("/knxota/files?fs=" + otaFs + "&job=" + otaJob)).json(); }
-  catch (e) { otaFiles = []; }
+  const seq = ++otaFilesSeq; // an older answer that arrives late must not overwrite the newer list
+  let files = [], note = "";
+  let r = null;
+  try { r = await fetch("/knxota/files?fs=" + otaFs + "&job=" + otaJob); }
+  catch (e) { note = "Liste nicht geladen: keine Antwort von diesem Gerät."; }
+  if (r && r.ok) {
+    try {
+      files = await r.json();
+      if (r.headers.get("X-List-Cut") === "1") note = "Liste gekürzt: Dieses Gerät konnte nicht alle Dateien auflisten.";
+    } catch (e) { files = []; note = "Liste nicht geladen: Antwort dieses Geräts unvollständig."; }
+  } else if (r) note = r.status === 503 ? "Liste nicht geladen: Dieses Gerät ist gerade beschäftigt oder hat zu wenig Arbeitsspeicher." : "Liste nicht geladen (HTTP " + r.status + ").";
+  if (seq !== otaFilesSeq) return;
+  otaFiles = files; otaFilesNote = note;
   otaSel = null;
   otaRender();
 }
@@ -186,7 +198,11 @@ function otaDrawFiles() {
   const tb = _o("otaFiles");
   tb.innerHTML = "";
   // An empty list is the usual first visit: say where the file comes from, not only that it is missing.
-  _o("otaNoFile").classList.toggle("fm-hidden", otaFiles.length > 0);
+  _o("otaNoFile").classList.toggle("fm-hidden", otaFiles.length > 0 || !!otaFilesNote);
+  if (!otaFiles.length && otaFilesNote) {
+    tb.innerHTML = '<tr><td colspan="2" class="gray">' + otaFilesNote + '</td></tr>';
+    return;
+  }
   if (!otaFiles.length) {
     tb.innerHTML = '<tr><td colspan="2" class="gray">Keine passende Datei auf diesem Laufwerk</td></tr>';
     _o("otaNoFileText").innerHTML = "<b>Hier liegt noch keine " + (otaJob === "delta" ? "Differenz-Datei (.okd)" : "Firmware-Datei") + ".</b> "
@@ -199,12 +215,18 @@ function otaDrawFiles() {
     const tr = document.createElement("tr");
     tr.className = "pick"; tr.tabIndex = 0;
     tr.setAttribute("aria-selected", String(otaSel === i));
-    tr.innerHTML = '<td class="mono">' + f.name + '</td><td class="right">' + f.size + '</td>';
+    const esc = s => String(s).replace(/[&<>"']/g, c => "&#" + c.charCodeAt(0) + ";"); // device data, not markup
+    // The transfer takes at most 95 bytes of local path ("sd/", "efc/" or "/" plus the name, FTC_PATH_MAX)
+    const tooLong = new TextEncoder().encode((otaFs === "sd" ? "sd/" : otaFs === "efc" ? "efc/" : "/") + f.name).length > 95;
+    tr.innerHTML = '<td class="mono">' + esc(f.name) + (tooLong ? ' <span class="gray">(Name zu lang für den Transfer)</span>' : '')
+      + '</td><td class="right">' + esc(f.size) + '</td>';
+    if (tooLong) { tr.className = "gray"; tb.appendChild(tr); return; }
     const pick = () => { otaSel = i; otaRender(); };
     tr.onclick = pick;
     tr.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); } };
     tb.appendChild(tr);
   });
+  if (otaFilesNote) tb.insertAdjacentHTML("beforeend", '<tr><td colspan="2" class="gray">' + otaFilesNote + '</td></tr>');
 }
 // Was das Ziel nicht kann, wird ausgegraut statt erst beim Start abgelehnt. Erst nachdem das Gerät
 // gelesen wurde -- vorher ist "kann nicht" nicht belegt, sondern nur unbekannt.
@@ -341,7 +363,11 @@ function otaApply(s) {
   otaRunning = (s.phase === "upload" || s.phase === "verify");
   if (s.dev && s.dev.pa === pa) { otaDev = s.dev; otaDevPa = s.dev.pa; otaDevMiss = false; if (!otaDevAt) otaDevAt = Date.now(); }
   if (s.drives && s.drivesPa === pa) otaDrv = s.drives;
-  if (s.ga) { otaGa = s.ga.lost ? null : (s.ga.pa === pa ? s.ga.rows : otaGa); otaGaLost = s.ga.lost; otaGaCut = !!s.ga.cut; }
+  if (s.ga) {
+    otaGaLost = s.ga.lost; otaGaCut = !!s.ga.cut;
+    if (s.ga.lost) { otaGa = null; otaGaVer = null; }
+    else if (s.ga.pa === pa && s.ga.ver !== otaGaVer) otaGaFetch(pa, s.ga.n, s.ga.ver);
+  }
   if (s.scan) {
     otaScanDone = s.scan.done; otaScanTotal = s.scan.total;
     if (s.scan.hits) otaHits = s.scan.hits; // an empty list is a result too: the device rescanned
@@ -383,6 +409,38 @@ function otaApply(s) {
 }
 let otaLive = null, otaGaLost = false;
 let otaGaCut = false; // the read was cut short -> the rows are a prefix
+let otaGaVer = null, otaGaBusy = false; // version of the rows in otaGa; one page chain at a time
+// The rows come in pages of 40 and only when their version changed. A table that changes during the chain (read
+// running) is shown as it came, but not marked as current: otaGaVer is set to null and the next poll fetches again.
+let otaGaRetryAt = 0; // after a chain or a refused page: a pause instead of a new chain on every poll
+// fetch options with a time limit; browsers without AbortSignal.timeout fetch without one
+const otaTimeout = ms => (typeof AbortSignal !== "undefined" && AbortSignal.timeout) ? { signal: AbortSignal.timeout(ms) } : {};
+async function otaGaFetch(pa, n, ver) {
+  if (otaGaBusy) return;
+  if (!n) { otaGa = []; otaGaVer = ver; return; }
+  if (Date.now() < otaGaRetryAt) return;
+  otaGaBusy = true;
+  const rows = [];
+  let pageVer = null, same = true, total = n;
+  try {
+    while (rows.length < total) {
+      const r = await fetch("/knxota/garows?from=" + rows.length, otaTimeout(5000)); // a hung page must not hold the chain
+      if (!r.ok) { otaGaRetryAt = Date.now() + 5000; return; }
+      const p = await r.json();
+      if (p.pa !== pa || p.from !== rows.length || !p.rows.length) return;
+      rows.push(...p.rows);
+      if (pageVer !== null && p.ver !== pageVer) same = false;
+      pageVer = p.ver;
+      total = p.n; // the table may have grown or shrunk since the status
+    }
+    if (otaGaLost || otaNorm(_o("otaPa").value) !== pa) return; // a fast transfer or a new target came in between
+    otaGa = rows;
+    otaGaVer = same ? pageVer : null; // the loop ends only at rows.length === total
+    otaGaRetryAt = Date.now() + 3000; // while a table is read its version changes on every poll
+    otaRender();
+  } catch (e) { /* the next poll tries again */ }
+  finally { otaGaBusy = false; }
+}
 // What came of the apply. The client puts it in status.message: silence means applied, 0xA0/0xA2 means
 // refused -- and each needs a different remedy. `unconfirmed` is a field of its own: the apply went out
 // to an old FTM that cannot confirm it (only its RP2040 builds have it at all).
@@ -512,7 +570,8 @@ function otaFinished(s) {
   }
   if (who === "otaGa") {
     otaGaAt = new Date().toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
-    const n = otaGa ? otaGa.length : 0;
+    // The count from the status: the rows may still be on their way (otaGaFetch)
+    const g = s.ga, n = g && !g.lost && g.pa === otaNorm(_o("otaPa").value) ? g.n : (otaGa ? otaGa.length : 0);
     otaLog("Gruppenadressen gelesen: " + n + " Einträge", "ota-ok");
     if (n) _o("otaGaBox").open = true;
     return;
@@ -584,15 +643,15 @@ function otaSummaryOf(s) {
   if (r && r.ok) {
     const secs = (r.ms / 1000);
     if (r.kind === 1) {
-      rows.push(["Ergebnis", '<span class="ota-ok">erfolgreich</span>'], ["Ziel", r.pa],
+      rows.push(["Ergebnis", '<span class="ota-ok">erfolgreich</span>'], ["Ziel", otaEsc(r.pa)],
            ["Gemessen", otaKb(r.bytes)], ["Mittlerer Durchsatz", r.bps + " B/s"],
            ["Dauer", otaDur(secs)], ["Blöcke", r.chunks],
            ["Verfahren", r.mode === 1 ? "fast" : "safe"],
            ["Mess-Datei", r.cleanup === 1 ? "wieder entfernt" : r.cleanup === 2 ? "auf dem Ziel behalten"
                  : r.cleanup === 3 ? "liegen geblieben" : "—"]);
     } else {
-      rows.push(["Ergebnis", '<span class="ota-ok">erfolgreich</span>'], ["Ziel", r.pa],
-           ["Datei", r.file || "—"],
+      rows.push(["Ergebnis", '<span class="ota-ok">erfolgreich</span>'], ["Ziel", otaEsc(r.pa)],
+           ["Datei", r.file ? otaEsc(r.file) : "—"],
            ["Übertragen", otaKb(r.bytes) + " in " + r.chunks + " Blöcken"],
            ["Dauer", otaDur(secs)], ["Mittlerer Durchsatz", r.bps + " B/s"],
            ["Verfahren", r.mode === 1 ? "fast" : "safe"],
@@ -624,8 +683,8 @@ function otaSummaryOf(s) {
   } else {
     const pc = s.total ? (s.done / s.total * 100).toFixed(0) : "0";
     rows.push(["Ergebnis", '<span class="ota-err">abgebrochen bei ' + pc + ' %</span>'],
-         ["Grund", '<span class="ota-err">' + (otaMsgDe(s.message) || "kein Grund gemeldet") + '</span>'],
-         ["Ziel", s.target]);
+         ["Grund", '<span class="ota-err">' + otaEsc(otaMsgDe(s.message) || "kein Grund gemeldet") + '</span>'],
+         ["Ziel", otaEsc(s.target)]);
     if (s.total) rows.push(["Übertragen", otaKb(s.done) + " von " + otaKb(s.total)],
                ["Blöcke", s.chunk + " von " + s.chunks]);
     rows.push(["Prüfsumme", "nicht geprüft"], ["Anwenden", "nicht ausgelöst"]);
@@ -869,7 +928,7 @@ _o("otaDevHead").textContent = pa
  + (d.ftm ? " · FTM " + ver : "");
     _o("otaDevAge").textContent = otaDevAt ? ("gelesen " + otaAgo(otaDevAt)) : "";
     const nm = v => (v === undefined || v === null || v === "")
-      ? '<span class="gray">vom Gerät nicht gemeldet</span>' : v;
+      ? '<span class="gray">vom Gerät nicht gemeldet</span>' : otaEsc(v);
     const ld = v => ["nicht geladen", "geladen", "lädt", "Fehler", "wird entladen", "schließt ab"][v] || "—";
     _o("otaDevRows").innerHTML =
       otaRow("Geräteklasse", nm(d.cls) + (d.mask ? ' <span class="gray">(Maske ' + d.mask.toString(16).toUpperCase().padStart(4, "0") + ')</span>' : ""))
@@ -1020,7 +1079,7 @@ _o("otaDevHead").textContent = pa
     bt.className = "mini"; bt.textContent = "Übernehmen";
     bt.onclick = () => {
       _o("otaPa").value = h.pa;
-      otaDev = null; otaDevMiss = false; otaDevAt = 0; otaDrv = null; otaGa = null;
+      otaDev = null; otaDevMiss = false; otaDevAt = 0; otaDrv = null; otaGa = null; otaGaVer = null; otaGaRetryAt = 0;
       otaLog("Ziel " + h.pa + " übernommen");
       otaSyncRange();
       otaRender();
@@ -1239,6 +1298,8 @@ function otaInit() {
     document.querySelectorAll("[data-otafs]").forEach(x => x.classList.remove("active"));
     t.classList.add("active");
     otaFs = t.dataset.otafs;
+    otaSel = null; otaFiles = []; otaFilesNote = ""; // no file of the old drive may go out with the new one
+    otaRender();
     otaLoadFiles();
   });
   _o("otaSafe").onclick = () => { otaFast = false; _o("otaSafe").setAttribute("aria-pressed", "true");
@@ -1246,7 +1307,7 @@ function otaInit() {
   _o("otaFast").onclick = () => { if (_o("otaFast").disabled) return; otaFast = true; _o("otaSafe").setAttribute("aria-pressed", "false");
     _o("otaFast").setAttribute("aria-pressed", "true"); _o("otaWin").disabled = false; otaRender(); };
   _o("otaPa").oninput = () => { otaDev = null; otaDevMiss = false; otaDevAt = 0; otaAccAt = 0;
-    otaDrv = null; otaGa = null; otaPmGuess = null; otaRender(); };
+    otaDrv = null; otaGa = null; otaGaVer = null; otaGaRetryAt = 0; otaPmGuess = null; otaRender(); };
   _o("otaRead").onclick = () => otaArm("otaRead", "feat", { pa: _o("otaPa").value });
   _o("otaSearchToggle").onclick = () => {
     const d = _o("otaDrawer");

@@ -28,6 +28,7 @@ class FileTransferWebClient
     void handlePage(OpenKNX::Network::WebRequest &req, OpenKNX::Network::WebResponse &res);
     void handleStatus(OpenKNX::Network::WebRequest &req, OpenKNX::Network::WebResponse &res);
     void handleFiles(OpenKNX::Network::WebRequest &req, OpenKNX::Network::WebResponse &res);
+    void handleGaRows(OpenKNX::Network::WebRequest &req, OpenKNX::Network::WebResponse &res);
     void handleStart(OpenKNX::Network::WebRequest &req, OpenKNX::Network::WebResponse &res);
     void handleCancel(OpenKNX::Network::WebRequest &req, OpenKNX::Network::WebResponse &res);
     void handleTrigger(OpenKNX::Network::WebRequest &req, OpenKNX::Network::WebResponse &res);
